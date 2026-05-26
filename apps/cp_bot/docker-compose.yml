@@ -1,0 +1,21 @@
+services:
+  dingtalk-cp-bot:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.cp
+    image: dingtalk-cp-bot:latest
+    container_name: dingtalk-cp-bot
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      COMMON_DIR: /opt/common
+      TZ: Asia/Shanghai
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./files:/app/files:ro
+      - ${COMMON_DIR:-/home/yida/Project/automation}:/opt/common:ro
+    command: ["python", "app.py"]

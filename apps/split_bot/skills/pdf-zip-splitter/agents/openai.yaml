@@ -1,0 +1,4 @@
+interface:
+  display_name: "DingTalk PDF Split Bot"
+  short_description: "Maintain DingTalk PDF splitting and ZIP workflows."
+  default_prompt: "Use $pdf-zip-splitter to maintain dingtalk-split-bot or split a PDF into supplier PDFs packaged as a ZIP."

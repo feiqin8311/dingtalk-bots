@@ -1,0 +1,9 @@
+.git
+.gitignore
+**/.env
+**/__pycache__/
+**/*.pyc
+apps/cp_bot/downloads/
+apps/cp_bot/files/
+apps/split_bot/.bot-workspace/
+tests/

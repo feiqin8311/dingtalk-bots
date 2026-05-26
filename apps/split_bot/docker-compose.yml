@@ -1,0 +1,12 @@
+services:
+  dingtalk-split-bot:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.split
+    container_name: dingtalk-split-bot
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./.bot-workspace:/app/.bot-workspace

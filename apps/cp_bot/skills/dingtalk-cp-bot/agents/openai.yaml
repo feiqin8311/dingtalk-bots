@@ -1,0 +1,4 @@
+interface:
+  display_name: "DingTalk CP Bot"
+  short_description: "Maintain the DingTalk logistics document bot"
+  default_prompt: "Use $dingtalk-cp-bot to inspect, modify, or operate the DingTalk CP logistics bot."

@@ -1,0 +1,5 @@
+pypdf
+openpyxl
+alibabacloud-dingtalk
+dingtalk-stream
+websockets

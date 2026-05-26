@@ -1,0 +1,14 @@
+dingtalk-stream>=0.24.0
+python-dotenv>=1.0.0
+aiohttp>=3.8.0
+pycryptodome>=3.19.0
+alibabacloud-ocr-api20210707>=2.0.0
+pymupdf>=1.23.0
+PyMySQL>=1.1.1
+openpyxl>=3.1.2
+pysmb>=1.2.10
+pypdf
+alibabacloud-dingtalk
+websockets
+requests
+
