@@ -33,12 +33,11 @@ RouteName = Literal["cp", "split", "help", "reset", "select_cp", "select_split"]
 HELP_TEXT = """物流部机器人
 
 请选择要办理的业务：
-
 1. 发货单核对
 2. 标签/PDF 拆分
 
-回复 1 或 2 进入对应业务。
-回复“重置”可重新开始。
+回复【1】或【2】进入对应业务
+回复【重置】➡️ 放弃本次并重新选择业务
 """
 
 CP_SELECTED_TEXT = """已进入：1. 发货单核对
@@ -46,7 +45,7 @@ CP_SELECTED_TEXT = """已进入：1. 发货单核对
 请发送发货单号，例如：
 SP260204001
 
-回复“重置”可重新选择业务。
+回复【重置】➡️ 放弃本次并重新选择业务
 """
 
 SPLIT_SELECTED_TEXT = """已进入：2. 标签/PDF 拆分
@@ -54,15 +53,16 @@ SPLIT_SELECTED_TEXT = """已进入：2. 标签/PDF 拆分
 请上传 PDF 文件和 Excel 规则文件。
 拆分预览后，回复“确认”继续，或回复“取消”放弃。
 
-回复“重置”可重新选择业务。
+回复【重置】➡️ 放弃本次并重新选择业务
 """
 
 RESET_TEXT = """已重置当前选择。
 
 请选择要办理的业务：
-
 1. 发货单核对
 2. 标签/PDF 拆分
+
+回复【重置】➡️ 放弃本次并重新选择业务
 """
 
 
@@ -77,6 +77,10 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self._call_log = self._build_call_log_store()
 
     async def process(self, callback: dingtalk_stream.CallbackMessage) -> Tuple[str, str]:
+        if getattr(self.split_handler, "dingtalk_client", None) is None:
+            self.split_handler.dingtalk_client = self.dingtalk_client
+        if getattr(self.cp_handler, "dingtalk_client", None) is None:
+            self.cp_handler.dingtalk_client = self.dingtalk_client
         user_id = self._extract_user_id(callback.data)
         route = self._route(callback.data, user_id=user_id)
         self.logger.info("logistics router selected route=%s", route)
@@ -128,6 +132,12 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
     def _log_route_event(self, payload: dict, *, route: RouteName, user_id: str) -> None:
         if self._call_log is None:
             return
+        if route in {"reset", "select_cp", "select_split", "help"}:
+            return
+        text = self._extract_text(payload)
+        normalized = self._normalize_command(text)
+        if route == "split" and normalized in {"确认", "确认拆分", "confirm", "取消", "取消拆分", "cancel"}:
+            return
         try:
             self._call_log.log_event(
                 bot_module="logistics",
@@ -150,17 +160,13 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             return "select_cp"
         if self._is_menu_choice(normalized, "2"):
             return "select_split"
-        if collect_download_codes(payload):
-            return "split"
-        if normalized in {"确认", "确认拆分", "confirm", "取消", "取消拆分", "cancel"}:
-            return "split"
         selected = self._selected_branch_by_user.get(user_id or "")
         if selected in {"cp", "split"}:
+            if collect_download_codes(payload):
+                return "split"
+            if normalized in {"确认", "确认拆分", "confirm", "取消", "取消拆分", "cancel"}:
+                return "split"
             return selected
-        if self._looks_like_split_command(text):
-            return "split"
-        if self._looks_like_cp_command(text):
-            return "cp"
         return "help"
 
     @staticmethod

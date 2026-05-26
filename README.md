@@ -57,7 +57,7 @@ Build and run both services:
 docker compose up -d --build
 ```
 
-By default this starts only `dingtalk-logistics-bot`. To run old standalone services too:
+By default this starts only `dingtalk-bot`. To run old standalone services too:
 
 ```bash
 docker compose --profile legacy up -d --build

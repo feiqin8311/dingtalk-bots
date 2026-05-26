@@ -56,6 +56,12 @@ class LogisticsRouterTests(unittest.TestCase):
         self.router._selected_branch_by_user["u1"] = "cp"
         self.assertEqual(self.router._route({"text": {"content": "SP260204001"}}, user_id="u1"), "cp")
 
+    def test_first_use_shipment_number_shows_menu(self):
+        self.assertEqual(self.router._route({"text": {"content": "SP260204001"}}, user_id="u1"), "help")
+
+    def test_first_use_split_keyword_shows_menu(self):
+        self.assertEqual(self.router._route({"text": {"content": "帮我拆分PDF"}}, user_id="u1"), "help")
+
     def test_reset_command_resets_current_user(self):
         self.router._selected_branch_by_user["u1"] = "split"
         self.assertEqual(self.router._route({"text": {"content": "重置"}}, user_id="u1"), "reset")
