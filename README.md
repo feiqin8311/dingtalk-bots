@@ -34,6 +34,21 @@ The Logistics bot menu is:
 
 Reply `重置` to clear the current branch selection and start again.
 
+## Database
+
+The project-level call log database/table is shared by all departments, routers, and bot branches:
+
+```text
+DB_NAME=dingtalk_bot
+BOT_CALL_LOG_TABLE=fact_dingtalk_bot_call_log
+```
+
+Create it with:
+
+```bash
+mysql < sql/dingtalk_bot_call_log.sql
+```
+
 ## Docker
 
 Build and run both services:

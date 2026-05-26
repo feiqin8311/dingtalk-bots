@@ -26,7 +26,6 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tup
 import os
 
 import dingtalk_stream
-import pymysql
 from dingtalk_stream import AckMessage
 import fitz  # PyMuPDF
 
@@ -50,6 +49,7 @@ from address_matching import (
     score_address_candidate as _score_address_candidate,
 )
 import config
+from shared.call_log import ProjectCallLogStore
 from shipment_service import fetch_shipment_detail_with_fallback
 from usage_state import InMemoryRuntimeState, normalize_shipment_sns
 
@@ -570,9 +570,6 @@ class _SelectedFileChoice:
 
 
 class _StateStore:
-    REQUEST_LOG_TABLE = "fact_bot_cp_call_log"
-    REQUIRED_TABLES = (REQUEST_LOG_TABLE,)
-
     def __init__(
         self,
         *,
@@ -581,68 +578,18 @@ class _StateStore:
         user: str,
         password: str,
         database: str,
+        table: str,
         connect_timeout_sec: int = 5,
     ):
-        self.host = host
-        self.port = port
-        self.user = user
-        self.password = password
-        self.database = database
-        self.connect_timeout_sec = connect_timeout_sec
-
-        self._lock = threading.Lock()
-        self._conn: Optional[pymysql.connections.Connection] = None
-        self._connect()
-        self._assert_schema_ready()
-
-    def _connect(self) -> None:
-        self._conn = pymysql.connect(
-            host=self.host,
-            port=self.port,
-            user=self.user,
-            password=self.password,
-            database=self.database,
-            charset="utf8mb4",
-            autocommit=False,
-            connect_timeout=self.connect_timeout_sec,
-            read_timeout=30,
-            write_timeout=30,
+        self._call_log = ProjectCallLogStore(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=database,
+            table=table,
+            connect_timeout_sec=connect_timeout_sec,
         )
-
-    def _ensure_conn(self) -> pymysql.connections.Connection:
-        if self._conn is None:
-            self._connect()
-            assert self._conn is not None
-            return self._conn
-        try:
-            self._conn.ping(reconnect=True)
-        except Exception:
-            self._connect()
-        assert self._conn is not None
-        return self._conn
-
-    def _assert_schema_ready(self) -> None:
-        conn = self._ensure_conn()
-        placeholders = ", ".join(["%s"] * len(self.REQUIRED_TABLES))
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = %s
-                  AND table_name IN ({placeholders})
-                """,
-                (self.database, *self.REQUIRED_TABLES),
-            )
-            rows = cur.fetchall()
-        existing = {str(row[0]) for row in rows}
-        missing = [table for table in self.REQUIRED_TABLES if table not in existing]
-        if missing:
-            raise RuntimeError(
-                "MySQL call log table missing: "
-                + ", ".join(missing)
-                + ". Please create fact_bot_cp_call_log before starting the bot."
-            )
 
     def log_request_event(
         self,
@@ -667,27 +614,17 @@ class _StateStore:
             sn_text = ",".join(normalize_shipment_sns(shipment_sns))
             if sn_text:
                 message_text = f"{message_text}\n\nshipment_sns={sn_text}" if message_text else f"shipment_sns={sn_text}"
-        with self._lock:
-            conn = self._ensure_conn()
-            with conn.cursor() as cur:
-                try:
-                    conn.begin()
-                    cur.execute(
-                        f"""
-                        INSERT INTO {self.REQUEST_LOG_TABLE}
-                        (user_id, user_name, message_text)
-                        VALUES(%s, %s, %s)
-                        """,
-                        (
-                            safe_user_id,
-                            safe_user_name,
-                            message_text or None,
-                        ),
-                    )
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    raise
+        self._call_log.log_event(
+            bot_module="cp",
+            event_type=event_type,
+            request_id=request_id,
+            message_id=message_id,
+            user_id=safe_user_id,
+            user_name=safe_user_name,
+            ack_status=ack_status,
+            shipment_sns=",".join(normalize_shipment_sns(shipment_sns or [])) if shipment_sns else None,
+            message_text=message_text or None,
+        )
 
 
 class ShipmentQueryHandler(dingtalk_stream.ChatbotHandler):
@@ -732,6 +669,7 @@ class ShipmentQueryHandler(dingtalk_stream.ChatbotHandler):
             user=config.DB_USER,
             password=config.DB_PASSWORD,
             database=config.DB_NAME,
+            table=config.BOT_CALL_LOG_TABLE,
             connect_timeout_sec=config.DB_CONNECT_TIMEOUT_SEC,
         )
         self._runtime_state = InMemoryRuntimeState()

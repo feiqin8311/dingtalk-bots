@@ -5,6 +5,7 @@ import re
 import sys
 import json
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Literal, Tuple
 
@@ -24,6 +25,7 @@ from handler import ShipmentQueryHandler  # type: ignore  # noqa: E402
 from Bot.handler import PdfSplitBotHandler  # type: ignore  # noqa: E402
 from Bot.runtime import collect_download_codes  # type: ignore  # noqa: E402
 from Utils.dingtalk_api import get_token, send_robot_private_text_message  # type: ignore  # noqa: E402
+from shared.call_log import ProjectCallLogStore  # noqa: E402
 
 
 RouteName = Literal["cp", "split", "help", "reset", "select_cp", "select_split"]
@@ -72,11 +74,13 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self.cp_handler = ShipmentQueryHandler(logger=logger)
         self.split_handler = PdfSplitBotHandler(logger=logger, config=config)
         self._selected_branch_by_user: dict[str, RouteName] = {}
+        self._call_log = self._build_call_log_store()
 
     async def process(self, callback: dingtalk_stream.CallbackMessage) -> Tuple[str, str]:
         user_id = self._extract_user_id(callback.data)
         route = self._route(callback.data, user_id=user_id)
         self.logger.info("logistics router selected route=%s", route)
+        self._log_route_event(callback.data, route=route, user_id=user_id)
         if route == "reset":
             self._reset_user(user_id)
             await self._send_text(callback.data, RESET_TEXT)
@@ -97,6 +101,45 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             return await self.split_handler.process(callback)
         await self._send_text(callback.data, HELP_TEXT)
         return AckMessage.STATUS_OK, "HELP"
+
+    def _build_call_log_store(self) -> ProjectCallLogStore | None:
+        missing = [
+            name
+            for name, value in {
+                "DB_HOST": getattr(self.config, "db_host", ""),
+                "DB_USER": getattr(self.config, "db_user", ""),
+                "DB_NAME": getattr(self.config, "db_name", ""),
+            }.items()
+            if not str(value).strip()
+        ]
+        if missing:
+            self.logger.warning("logistics call log disabled: missing %s", ", ".join(missing))
+            return None
+        return ProjectCallLogStore(
+            host=getattr(self.config, "db_host"),
+            port=getattr(self.config, "db_port", 3306),
+            user=getattr(self.config, "db_user"),
+            password=getattr(self.config, "db_password", ""),
+            database=getattr(self.config, "db_name"),
+            table=getattr(self.config, "bot_call_log_table", "fact_dingtalk_bot_call_log"),
+            connect_timeout_sec=getattr(self.config, "db_connect_timeout_sec", 5),
+        )
+
+    def _log_route_event(self, payload: dict, *, route: RouteName, user_id: str) -> None:
+        if self._call_log is None:
+            return
+        try:
+            self._call_log.log_event(
+                bot_module="logistics",
+                event_type=f"ROUTE_{str(route).upper()}",
+                request_id=str(payload.get("messageId") or payload.get("msgId") or uuid.uuid4().hex[:12]),
+                message_id=str(payload.get("messageId") or payload.get("msgId") or "") or None,
+                user_id=user_id or None,
+                user_name=self._extract_user_name(payload),
+                message_text=self._extract_text(payload) or f"[{route}]",
+            )
+        except Exception as exc:
+            self.logger.warning("logistics route call log failed: %s", exc)
 
     def _route(self, payload: dict, *, user_id: str) -> RouteName:
         text = self._extract_text(payload)
@@ -213,6 +256,22 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         except Exception:
             pass
         for key in ("senderStaffId", "sender_staff_id", "senderId", "sender_id"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _extract_user_name(payload: dict) -> str:
+        try:
+            incoming_message = dingtalk_stream.ChatbotMessage.from_dict(payload)
+            for attr in ("sender_nick", "senderNick", "sender_name", "senderName", "sender_staff_name", "senderStaffName"):
+                value = getattr(incoming_message, attr, None)
+                if value:
+                    return str(value)
+        except Exception:
+            pass
+        for key in ("senderNick", "sender_nick", "senderName", "sender_name", "senderStaffName"):
             value = payload.get(key)
             if value:
                 return str(value)

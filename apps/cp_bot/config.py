@@ -112,6 +112,7 @@ DB_USER = (os.getenv("DB_USER") or "").strip()
 DB_PASSWORD = (os.getenv("DB_PASSWORD") or "").strip()
 DB_NAME = (os.getenv("DB_NAME") or "").strip()
 DB_CONNECT_TIMEOUT_SEC = int((os.getenv("DB_CONNECT_TIMEOUT_SEC") or "5").strip())
+BOT_CALL_LOG_TABLE = (os.getenv("BOT_CALL_LOG_TABLE") or "fact_dingtalk_bot_call_log").strip()
 
 # File cleanup
 DOWNLOAD_RETENTION_DAYS = 7

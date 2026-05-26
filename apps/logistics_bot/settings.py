@@ -39,6 +39,13 @@ class LogisticsBotConfig:
     split_workspace: str
     stream_ws_ping_interval: int
     stream_ws_ping_timeout: int
+    db_host: str
+    db_port: int
+    db_user: str
+    db_password: str
+    db_name: str
+    db_connect_timeout_sec: int
+    bot_call_log_table: str
 
     @property
     def workspace(self) -> str:
@@ -97,4 +104,11 @@ def load_config_from_env() -> LogisticsBotConfig:
         split_workspace=workspace,
         stream_ws_ping_interval=_read_positive_int_env("DING_STREAM_WS_PING_INTERVAL", 30),
         stream_ws_ping_timeout=_read_positive_int_env("DING_STREAM_WS_PING_TIMEOUT", 120),
+        db_host=os.getenv("DB_HOST", "").strip(),
+        db_port=int((os.getenv("DB_PORT") or "3306").strip()),
+        db_user=os.getenv("DB_USER", "").strip(),
+        db_password=os.getenv("DB_PASSWORD", "").strip(),
+        db_name=os.getenv("DB_NAME", "").strip(),
+        db_connect_timeout_sec=int((os.getenv("DB_CONNECT_TIMEOUT_SEC") or "5").strip()),
+        bot_call_log_table=(os.getenv("BOT_CALL_LOG_TABLE") or "fact_dingtalk_bot_call_log").strip(),
     )

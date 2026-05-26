@@ -2,7 +2,7 @@
 
 ## Repository
 
-`/home/yida/Project/dingtalk-cp-bot`
+`/home/yida/Project/dingtalk-bots/apps/cp_bot`
 
 ## Business Flow
 
@@ -44,21 +44,12 @@
 
 ## Database Contract
 
-Only `fact_bot_cp_call_log` is required.
+Only the project-wide call log database/table is required for MySQL usage logging:
 
-```sql
-CREATE TABLE IF NOT EXISTS fact_bot_cp_call_log (
-  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '调用时间',
-  user_id VARCHAR(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '钉钉用户ID',
-  user_name VARCHAR(128) COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '用户名称',
-  message_text TEXT COLLATE utf8mb4_unicode_ci COMMENT '用户发送的问题',
-  PRIMARY KEY (id),
-  KEY idx_user_id (user_id),
-  KEY idx_created_at (created_at),
-  KEY idx_user_created (user_id, created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='CP机器人调用日志';
-```
+- Database: `dingtalk_bot`
+- Table: `fact_dingtalk_bot_call_log`
+
+The canonical schema is maintained at the monorepo root: `sql/dingtalk_bot_call_log.sql`. It includes routing/module fields (`bot_module`, `event_type`, `request_id`, `message_id`, `ack_status`, `shipment_sns`, `message_text`) so multiple departments and bot branches can share one table.
 
 Removed/unused tables:
 

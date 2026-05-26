@@ -7,13 +7,13 @@ description: Maintain and operate the DingTalk CP logistics document bot project
 
 ## Purpose
 
-Use this skill when working on the `dingtalk-cp-bot` repository. The project is a DingTalk enterprise robot for logistics document checking: users send `SP...` shipment numbers, the bot queries LingXing, downloads FBA PDFs, OCRs the first page, checks destination FC/address consistency, and replies in DingTalk.
+Use this skill when working on the CP branch under the `dingtalk-bots` monorepo. The project is a DingTalk enterprise robot for logistics document checking: users send `SP...` shipment numbers, the bot queries LingXing, downloads FBA PDFs, OCRs the first page, checks destination FC/address consistency, and replies in DingTalk.
 
 The source code is the highest authority. Read current files before making claims.
 
 ## First Steps
 
-1. Inspect `AGENTS.md` first. It points to external project memory under `/home/yida/Project/ai-memory/projects/dingtalk-cp-bot/`.
+1. Inspect `AGENTS.md` first. It points to external project memory under `/home/yida/Project/ai-memory/projects/dingtalk-bots/`.
 2. Read the smallest useful source set:
    - `README.md` for setup and current behavior.
    - `app.py` for startup.
@@ -39,8 +39,8 @@ Detailed project notes are in `references/project-brief.md`; read it when you ne
 
 The database is intentionally minimal. MySQL is only used to record who used the bot:
 
-- Required table: `fact_bot_cp_call_log`
-- Stored fields: `user_id`, `user_name`, `message_text`, plus `created_at`
+- Required database/table: `dingtalk_bot`.`fact_dingtalk_bot_call_log`
+- Stored fields include `created_at`, `bot_module`, `event_type`, `request_id`, `message_id`, `user_id`, `user_name`, `ack_status`, `shipment_sns`, and `message_text`
 - Message deduplication and shipment locks are in memory, not in MySQL.
 
 Do not recreate removed state tables unless the user explicitly asks for cross-process or multi-instance locking.
@@ -71,7 +71,7 @@ Do not expose the real SMB password in responses or generated docs.
 When the logistics OpenClaw agent receives one or more shipment numbers like `SP260421012`, run the one-shot checker instead of starting the long-running DingTalk Stream service:
 
 ```bash
-cd /home/yida/Project/dingtalk-cp-bot
+cd /home/yida/Project/dingtalk-bots/apps/cp_bot
 scripts/openclaw-run-cp-check.sh SP260421012 --user-id <sender_id> --user-name <sender_name>
 ```
 
@@ -121,13 +121,13 @@ PY
 
 ### Check Database Usage Logging
 
-Only verify `fact_bot_cp_call_log` unless the task asks otherwise:
+Only verify `dingtalk_bot`.`fact_dingtalk_bot_call_log` unless the task asks otherwise:
 
 ```sql
 SELECT table_name
 FROM information_schema.tables
 WHERE table_schema = DATABASE()
-  AND table_name = 'fact_bot_cp_call_log';
+  AND table_name = 'fact_dingtalk_bot_call_log';
 ```
 
 ## Editing Rules
