@@ -27,27 +27,6 @@ BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 load_env_files([ENV_PATH])
 load_dotenv(ENV_PATH, override=False)
-
-
-def _resolve_common_dir() -> Path:
-    configured = os.getenv("COMMON_DIR", "").strip()
-    if configured:
-        configured_path = Path(configured).expanduser().resolve()
-        if configured_path.exists():
-            return configured_path
-
-    for parent in (BASE_DIR, *BASE_DIR.parents):
-        candidate = parent / "Common"
-        if candidate.exists():
-            return candidate
-
-    return BASE_DIR / "Common"
-
-
-COMMON_DIR = _resolve_common_dir()
-COMMON_ENV_PATH = COMMON_DIR / ".env"
-if COMMON_ENV_PATH.exists():
-    load_dotenv(COMMON_ENV_PATH, override=False)
 load_dotenv(ENV_PATH, override=True)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

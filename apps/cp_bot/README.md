@@ -76,7 +76,6 @@ cp env.example .env
 - 领星：`LINGXING_API_KEY`、`LINGXING_API_SECRET`
 - OCR：`ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`
 - MySQL：`DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`
-- `COMMON_DIR` 可选；如果存在，会优先加载其中的 `.env` 作为基础环境变量。
 
 3. （可选）准备地址簿
 
@@ -159,7 +158,7 @@ docker compose up -d --build
 
 注意：
 
-- `docker-compose.yml` 当前挂载 `downloads`、`files`；`${COMMON_DIR}` 是可选兼容挂载。
+- `docker-compose.yml` 当前挂载 `downloads`、`files`。
 - 如果用本地地址簿文件，容器内要做地址簿匹配，需要挂载地址簿文件目录，或把 `ADDRESS_BOOK_XLSX_PATH` 指向容器内可读路径。
 - 如果用 `smb://...` 地址簿路径，不需要挂载共享盘，但容器需要能访问 SMB 服务器的 `445` 端口，并需要配置 `SMB_USERNAME/SMB_PASSWORD`。
 

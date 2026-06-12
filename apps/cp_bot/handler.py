@@ -11,7 +11,6 @@ import logging
 import random
 import re
 import shutil
-import sys
 import threading
 import time
 import traceback
@@ -52,49 +51,6 @@ import config
 from shared.call_log import ProjectCallLogStore
 from shipment_service import fetch_shipment_detail_with_fallback
 from usage_state import InMemoryRuntimeState, normalize_shipment_sns
-
-
-def _bootstrap_common_import_path() -> List[Path]:
-    candidates: List[Path] = []
-    configured = os.getenv("COMMON_DIR", "").strip()
-    if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.append(config.COMMON_DIR)
-    base_dir = Path(__file__).resolve().parent
-    for parent in (base_dir, *base_dir.parents):
-        candidates.append(parent / "Common")
-
-    valid_common_dirs: List[Path] = []
-    seen = set()
-    for raw in candidates:
-        try:
-            path = raw.resolve()
-        except Exception:
-            path = raw
-        key = str(path).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-
-        common_dir = None
-        if path.exists() and path.is_dir() and (path / "api").exists():
-            common_dir = path
-        elif path.exists() and path.is_dir() and path.name.lower() == "api":
-            parent_dir = path.parent
-            if (parent_dir / "api").exists():
-                common_dir = parent_dir
-
-        if not common_dir:
-            continue
-        common_text = str(common_dir)
-        if common_text not in sys.path:
-            sys.path.insert(0, common_text)
-        valid_common_dirs.append(common_dir)
-
-    return valid_common_dirs
-
-
-_COMMON_DIRS = _bootstrap_common_import_path()
 
 from api import DingTalkNotifier  # type: ignore
 from api.aliyun_client import AliyunOCRClient  # type: ignore

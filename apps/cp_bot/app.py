@@ -63,7 +63,6 @@ def main(client_id: Optional[str] = None, client_secret: Optional[str] = None) -
     logger.info("Starting DingTalk CP Bot...")
     logger.info("=" * 40)
     logger.info("Config module: %s", getattr(config, "__file__", "unknown"))
-    logger.info("Common env: %s (%s)", config.COMMON_ENV_PATH, "FOUND" if config.COMMON_ENV_PATH.exists() else "MISSING")
     logger.info(
         "Env check: LINGXING_API_KEY=%s LINGXING_API_SECRET=%s",
         "SET" if config.LINGXING_API_KEY else "MISSING",

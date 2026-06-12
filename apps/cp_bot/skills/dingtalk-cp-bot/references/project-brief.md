@@ -37,7 +37,7 @@
 - Aliyun OCR credentials.
 - MySQL for usage logging only.
 - Optional SMB access for `全站点地址.xlsx`.
-- External Common project referenced by `COMMON_DIR`; `handler.py` imports:
+- Local `apps/cp_bot/api` modules provide:
   - `api.DingTalkNotifier`
   - `api.aliyun_client.AliyunOCRClient`
   - `api.lingxing_client.LingXingClient`

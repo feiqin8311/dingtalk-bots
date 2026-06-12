@@ -14,7 +14,6 @@ services:
       - path: ./apps/split_bot/.env
         required: false
     environment:
-      COMMON_DIR: /opt/common
       TZ: Asia/Shanghai
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -22,7 +21,6 @@ services:
       - ./apps/cp_bot/downloads:/app/apps/cp_bot/downloads
       - ./apps/cp_bot/files:/app/apps/cp_bot/files:ro
       - ./apps/split_bot/.bot-workspace:/app/apps/split_bot/.bot-workspace
-      - ${COMMON_DIR:-/home/yida/Project/automation}:/opt/common:ro
     command: ["python", "apps/logistics_bot/main.py"]
 
   dingtalk-cp-bot:
@@ -37,14 +35,12 @@ services:
       - path: ./apps/cp_bot/.env
         required: false
     environment:
-      COMMON_DIR: /opt/common
       TZ: Asia/Shanghai
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./apps/cp_bot/downloads:/app/downloads
       - ./apps/cp_bot/files:/app/files:ro
-      - ${COMMON_DIR:-/home/yida/Project/automation}:/opt/common:ro
     command: ["python", "app.py"]
 
   dingtalk-split-bot:
