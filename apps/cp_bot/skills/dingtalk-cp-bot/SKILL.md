@@ -13,7 +13,7 @@ The source code is the highest authority. Read current files before making claim
 
 ## First Steps
 
-1. Inspect `AGENTS.md` first. It points to external project memory under `/home/yida/Project/ai-memory/projects/dingtalk-bots/`.
+1. Inspect `AGENTS.md` first. It points to gbrain MCP as the project memory source.
 2. Read the smallest useful source set:
    - `README.md` for setup and current behavior.
    - `app.py` for startup.

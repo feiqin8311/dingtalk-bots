@@ -76,8 +76,7 @@ Before changing production, verify current memory and source state. After confir
 ## Source And Memory
 
 Project memory:
-- `/home/yida/Project/ai-memory/AGENTS.md`
-- `/home/yida/Project/ai-memory/projects/dingtalk-split-bot/index.md`
+- gbrain MCP project memory for `dingtalk-bots` and `dingtalk-split-bot`
 
 Read targeted memory files as needed:
 - `architecture.md` for runtime flow

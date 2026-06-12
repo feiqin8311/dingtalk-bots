@@ -4,13 +4,13 @@ This app is maintained inside the active monorepo:
 
 `/home/yida/Project/dingtalk-bots`
 
-Project memory is maintained at:
+Project memory is maintained in gbrain MCP.
 
-`/home/yida/Project/ai-memory/projects/dingtalk-bots/`
+Before meaningful maintenance work, query gbrain MCP for:
 
-Before meaningful maintenance work, read:
+- `dingtalk-bots`
+- `split_bot`
+- the current task or error summary
+- relevant modules, decisions, deployment records, and prior incidents
 
-- `/home/yida/Project/ai-memory/AGENTS.md`
-- `/home/yida/Project/ai-memory/projects/dingtalk-bots/index.md`
-
-Source code is the highest source of truth. If memory conflicts with code, inspect code and update memory after the task.
+Source code is the highest source of truth. If gbrain memory conflicts with code, inspect code and update gbrain after the task.

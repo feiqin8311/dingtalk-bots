@@ -16,8 +16,8 @@ Source code is authoritative. Read `/home/yida/Project/dingtalk-split-bot/AGENTS
 
 ## Repository Workflow
 
-1. Read `/home/yida/Project/ai-memory/AGENTS.md`.
-2. Read `/home/yida/Project/ai-memory/projects/dingtalk-split-bot/index.md`.
+1. Inspect `AGENTS.md` first.
+2. Query gbrain MCP for `dingtalk-bots`, `dingtalk-split-bot`, and the current split/PDF task context.
 3. Read only the relevant memory files, usually `architecture.md`, `business-logic.md`, `operations.md`, `data-model.md`, or `api-map.md`.
 4. Inspect the implementing source files before changing behavior.
 5. Keep changes scoped and update project memory after meaningful behavior or operations changes.
