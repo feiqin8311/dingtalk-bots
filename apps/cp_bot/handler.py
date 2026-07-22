@@ -396,14 +396,39 @@ def _extract_fc_codes_filtered(text: str) -> List[str]:
         results.append(str(match.group(1)).strip().upper())
         results.append(str(match.group(2)).strip().upper())
 
-    # Fallback single code scan (do not require word boundary, only avoid digit-continuations).
-    for match in re.finditer(r"(?<!\d)([A-Z]{3}\d)(?!\d)", upper):
+    # Single codes must not be embedded in longer alphanumerics.
+    # Blocks false positives like ROOM2 -> OOM2; pair form above still covers ServicesLBA8/IMN1.
+    for match in re.finditer(r"(?<![A-Z0-9])([A-Z]{3}\d)(?![A-Z0-9])", upper):
         code = str(match.group(1)).strip().upper()
         if not _allow_by_context(match.start(1), match.end(1)):
             continue
         results.append(code)
 
     return _unique_preserve_order(results)
+
+
+def _format_destination_check_failure(
+    shipment_sn: str,
+    *,
+    ocr_fc: Optional[str],
+    ocr_fc_display: str,
+    dest_ids: List[str],
+    fallback_detail: str,
+) -> str:
+    """Prefer 'unable to verify' when address-book/parse is incomplete; reserve 'mismatch' for real rejects."""
+    dest_display = ",".join(dest_ids) if dest_ids else "-"
+    ocr_display = ocr_fc_display or "-"
+    detail = str(fallback_detail or "").strip()
+    incomplete = detail.startswith("ADDR_PARSE_INCOMPLETE") or detail.startswith("ADDR_UNSUPPORTED")
+    if incomplete:
+        if not ocr_fc:
+            return f"{shipment_sn} 无法完成目的地核对: OCR未识别到目的地; {detail}"
+        return (
+            f"{shipment_sn} 无法完成目的地核对: FC未直匹配(OCR候选={ocr_display}, 领星={dest_display}); {detail}"
+        )
+    if not ocr_fc:
+        return f"{shipment_sn} OCR 未识别到目的地; {detail}"
+    return f"{shipment_sn} 目的地不一致: OCR候选={ocr_display}, 领星={dest_display}; {detail}"
 
 
 def _extract_first_item_nation(items: Any) -> Optional[str]:
@@ -2092,12 +2117,15 @@ class ShipmentQueryHandler(dingtalk_stream.ChatbotHandler):
                         shipment_sn,
                         fallback_detail,
                     )
-                    if not ocr_fc:
-                        issues.append(f"{shipment_sn} OCR 未识别到目的地; {fallback_detail}")
-                    else:
-                        issues.append(
-                            f"{shipment_sn} 目的地不一致: OCR候选={ocr_fc_display}, 领星={','.join(dest_ids)}; {fallback_detail}"
+                    issues.append(
+                        _format_destination_check_failure(
+                            shipment_sn,
+                            ocr_fc=ocr_fc,
+                            ocr_fc_display=ocr_fc_display,
+                            dest_ids=dest_ids,
+                            fallback_detail=fallback_detail,
                         )
+                    )
                     continue
                 if matched_address:
                     match_basis = (

@@ -97,9 +97,13 @@ _SOURCE_NOISE_TOKENS = {
     "BUILDING",
     "DISTRICT",
     "BUSINESS",
+    "BUSINESSC",
     "CENTER",
+    "ENTERN",
+    "ENTERNNO",
     "WENYIXI",
     "WENRYIXI",
+    "WENWYIXI",
     "JIANGCUN",
     "YPLUSEU",
     "LIBRATON",
@@ -613,11 +617,41 @@ def _extract_uk_city_postal(text: str) -> Optional[Tuple[str, str]]:
 
 
 def _extract_uk_street(lines: List[str], city: str, postal: str) -> str:
-    road_pattern = re.compile(r"\b([A-Z0-9][A-Z0-9\s\-]{0,48}?\b(?:ROAD|STREET|DRIVE|LANE|WAY|AVENUE|PARK))\b")
+    road_suffix = r"(?:ROAD|STREET|DRIVE|LANE|WAY|AVENUE|PARK)"
+    # Prefer classic numbered UK streets first so company prefixes
+    # like "COM SERVICES INC 10 OYSTER ROAD" collapse to "10 OYSTER ROAD".
+    numbered_road_pattern = re.compile(
+        rf"\b(\d+[A-Z]?\s+[A-Z][A-Z0-9\s\-]{{0,40}}?\b{road_suffix})\b"
+    )
+    road_pattern = re.compile(rf"\b([A-Z0-9][A-Z0-9\s\-]{{0,48}}?\b{road_suffix})\b")
     city_pattern = re.compile(rf"\b{re.escape(_normalize_text_for_match(city))}\b") if city else None
     postal_spaced = _normalize_text_for_match(postal)
     postal_compact = re.sub(r"[^A-Z0-9]", "", postal_spaced)
     segments: List[str] = []
+
+    def _clean_segment(segment: str) -> str:
+        raw_tokens = segment.split()
+        cleaned_tokens: List[str] = []
+        for token in raw_tokens:
+            if token in _SOURCE_NOISE_TOKENS:
+                continue
+            if token in _UK_STREET_DROP_TOKENS:
+                continue
+            if re.fullmatch(r"\d{5,}", token):
+                continue
+            cleaned_tokens.append(token)
+        cleaned_segment = _normalize_spaces(" ".join(cleaned_tokens))
+        if not cleaned_segment:
+            return ""
+        if not re.search(rf"\b{road_suffix}\b", cleaned_segment):
+            return ""
+        if any(token in _SOURCE_NOISE_TOKENS for token in cleaned_segment.split()):
+            return ""
+        # If company/noise still prefixes a numbered street, keep the numbered tail.
+        numbered_tail = numbered_road_pattern.search(cleaned_segment)
+        if numbered_tail and not re.match(r"^\d+[A-Z]?\b", cleaned_segment):
+            return _normalize_spaces(numbered_tail.group(1))
+        return cleaned_segment
 
     for raw in lines:
         text = _normalize_street_text(raw, "UK")
@@ -631,30 +665,31 @@ def _extract_uk_street(lines: List[str], city: str, postal: str) -> str:
         if postal_compact:
             text = re.sub(rf"\b{re.escape(postal_compact)}\b", " ", re.sub(r"[^A-Z0-9\s]", " ", text))
             text = _normalize_street_text(text, "UK")
-        for match in road_pattern.finditer(text):
-            segment = _normalize_spaces(match.group(1))
-            if not segment:
-                continue
-            raw_tokens = segment.split()
-            cleaned_tokens: List[str] = []
-            for token in raw_tokens:
-                if token in _SOURCE_NOISE_TOKENS:
-                    continue
-                if token in _UK_STREET_DROP_TOKENS:
-                    continue
-                if re.fullmatch(r"\d{5,}", token):
-                    continue
-                cleaned_tokens.append(token)
-            cleaned_segment = _normalize_spaces(" ".join(cleaned_tokens))
-            if not cleaned_segment:
-                continue
-            if not re.search(r"\b(ROAD|STREET|DRIVE|LANE|WAY|AVENUE|PARK)\b", cleaned_segment):
-                continue
-            segments.append(cleaned_segment)
+        matches = list(numbered_road_pattern.finditer(text)) or list(road_pattern.finditer(text))
+        for match in matches:
+            cleaned_segment = _clean_segment(_normalize_spaces(match.group(1)))
+            if cleaned_segment:
+                segments.append(cleaned_segment)
 
     if not segments:
         return ""
-    return " ".join(_unique_preserve_order(segments))
+    # OCR often mixes destination + ship-from roads. Prefer a classic numbered UK street
+    # (e.g. "10 OYSTER ROAD") over concatenating every ROAD hit.
+    unique_segments = _unique_preserve_order(segments)
+
+    def _rank(segment: str) -> tuple:
+        tokens = segment.split()
+        has_leading_number = bool(re.match(r"^\d+[A-Z]?\b", segment))
+        has_noise = any(token in _SOURCE_NOISE_TOKENS for token in tokens)
+        return (
+            0 if has_leading_number else 1,
+            1 if has_noise else 0,
+            len(tokens),
+            len(segment),
+        )
+
+    unique_segments.sort(key=_rank)
+    return unique_segments[0]
 
 
 def format_address_record_for_reply(record: AddressRecord) -> str:
