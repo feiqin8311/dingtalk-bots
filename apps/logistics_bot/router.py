@@ -17,6 +17,8 @@ from settings import ROOT_DIR, LogisticsBotConfig
 
 CP_APP_DIR = ROOT_DIR / "apps" / "cp_bot"
 SPLIT_APP_DIR = ROOT_DIR / "apps" / "split_bot"
+PINXIANG_APP_DIR = ROOT_DIR / "apps" / "pinxiang_bot"
+# insert order: last wins for top-level `handler` → cp_bot must be last
 for path in (str(SPLIT_APP_DIR), str(CP_APP_DIR)):
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -27,16 +29,39 @@ from Bot.runtime import collect_download_codes  # type: ignore  # noqa: E402
 from Utils.dingtalk_api import get_token, send_robot_private_text_message  # type: ignore  # noqa: E402
 from shared.call_log import ProjectCallLogStore  # noqa: E402
 
+# pinxiang is isolated: load by absolute path so it never shadows cp_bot.handler
+import importlib.util
 
-RouteName = Literal["cp", "split", "help", "reset", "select_cp", "select_split"]
+_pinxiang_spec = importlib.util.spec_from_file_location(
+    "pinxiang_bot_handler",
+    PINXIANG_APP_DIR / "handler.py",
+)
+assert _pinxiang_spec and _pinxiang_spec.loader
+_pinxiang_module = importlib.util.module_from_spec(_pinxiang_spec)
+sys.modules["pinxiang_bot_handler"] = _pinxiang_module
+_pinxiang_spec.loader.exec_module(_pinxiang_module)
+PinxiangBotHandler = _pinxiang_module.PinxiangBotHandler
+
+
+RouteName = Literal[
+    "cp",
+    "split",
+    "pinxiang",
+    "help",
+    "reset",
+    "select_cp",
+    "select_split",
+    "select_pinxiang",
+]
 
 HELP_TEXT = """物流部机器人
 
 请选择要办理的业务：
 1. 发货单核对
 2. 标签/PDF 拆分
+3. 不分仓拼箱
 
-回复【1】或【2】进入对应业务
+回复【1】【2】或【3】进入对应业务
 回复【重置】➡️ 放弃本次并重新选择业务
 """
 
@@ -56,11 +81,20 @@ SPLIT_SELECTED_TEXT = """已进入：2. 标签/PDF 拆分
 回复【重置】➡️ 放弃本次并重新选择业务
 """
 
+PINXIANG_SELECTED_TEXT = """已进入：3. 不分仓拼箱
+
+物流：上传发货单 Excel → 审核拼箱结果 → 确认并选择运营转发。
+运营：收到拼箱结果后，上传亚马逊「包装箱包装信息」表，机器人填写后回传。
+
+回复【重置】➡️ 放弃本次并重新选择业务
+"""
+
 RESET_TEXT = """已重置当前选择。
 
 请选择要办理的业务：
 1. 发货单核对
 2. 标签/PDF 拆分
+3. 不分仓拼箱
 
 回复【重置】➡️ 放弃本次并重新选择业务
 """
@@ -73,6 +107,7 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self.config = config
         self.cp_handler = ShipmentQueryHandler(logger=logger)
         self.split_handler = PdfSplitBotHandler(logger=logger, config=config)
+        self.pinxiang_handler = PinxiangBotHandler(logger=logger, config=config)
         self._selected_branch_by_user: dict[str, RouteName] = {}
         self._call_log = self._build_call_log_store()
 
@@ -81,6 +116,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             self.split_handler.dingtalk_client = self.dingtalk_client
         if getattr(self.cp_handler, "dingtalk_client", None) is None:
             self.cp_handler.dingtalk_client = self.dingtalk_client
+        if getattr(self.pinxiang_handler, "dingtalk_client", None) is None:
+            self.pinxiang_handler.dingtalk_client = self.dingtalk_client
         user_id = self._extract_user_id(callback.data)
         route = self._route(callback.data, user_id=user_id)
         self.logger.info("logistics router selected route=%s", route)
@@ -99,10 +136,17 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
                 self._selected_branch_by_user[user_id] = "split"
             await self._send_text(callback.data, SPLIT_SELECTED_TEXT)
             return AckMessage.STATUS_OK, "SELECT_SPLIT"
+        if route == "select_pinxiang":
+            if user_id:
+                self._selected_branch_by_user[user_id] = "pinxiang"
+            await self._send_text(callback.data, PINXIANG_SELECTED_TEXT)
+            return AckMessage.STATUS_OK, "SELECT_PINXIANG"
         if route == "cp":
             return await self.cp_handler.process(callback)
         if route == "split":
             return await self.split_handler.process(callback)
+        if route == "pinxiang":
+            return await self.pinxiang_handler.process(callback)
         await self._send_text(callback.data, HELP_TEXT)
         return AckMessage.STATUS_OK, "HELP"
 
@@ -132,11 +176,20 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
     def _log_route_event(self, payload: dict, *, route: RouteName, user_id: str) -> None:
         if self._call_log is None:
             return
-        if route in {"reset", "select_cp", "select_split", "help"}:
+        if route in {"reset", "select_cp", "select_split", "select_pinxiang", "help"}:
             return
         text = self._extract_text(payload)
         normalized = self._normalize_command(text)
-        if route == "split" and normalized in {"确认", "确认拆分", "confirm", "取消", "取消拆分", "cancel"}:
+        if route in {"split", "pinxiang"} and normalized in {
+            "确认",
+            "确认拆分",
+            "确认拼箱",
+            "confirm",
+            "取消",
+            "取消拆分",
+            "取消拼箱",
+            "cancel",
+        }:
             return
         try:
             self._call_log.log_event(
@@ -160,7 +213,15 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             return "select_cp"
         if self._is_menu_choice(normalized, "2"):
             return "select_split"
+        if self._is_menu_choice(normalized, "3"):
+            return "select_pinxiang"
         selected = self._selected_branch_by_user.get(user_id or "")
+        # 拼箱进行中（含运营待上传装箱表）强制进 pinxiang，避免运营被菜单拦住
+        if user_id and getattr(self.pinxiang_handler, "has_pending", lambda _u: False)(user_id):
+            return "pinxiang"
+        # pinxiang owns its confirm/cancel/files when selected
+        if selected == "pinxiang":
+            return "pinxiang"
         if selected in {"cp", "split"}:
             if collect_download_codes(payload):
                 return "split"
@@ -177,7 +238,11 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
     def _is_menu_choice(normalized: str, choice: str) -> bool:
         if normalized == choice:
             return True
-        return normalized.startswith(f"{choice}.") or normalized.startswith(f"{choice}、") or normalized.startswith(f"{choice},")
+        return (
+            normalized.startswith(f"{choice}.")
+            or normalized.startswith(f"{choice}、")
+            or normalized.startswith(f"{choice},")
+        )
 
     @staticmethod
     def _looks_like_split_command(text: str) -> bool:
@@ -251,6 +316,9 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self._selected_branch_by_user.pop(user_id, None)
         self.split_handler._pending_uploads.pop(user_id, None)
         self.split_handler._pending_confirmations.pop(user_id, None)
+        clear = getattr(self.pinxiang_handler, "clear_user", None)
+        if callable(clear):
+            clear(user_id)
 
     @staticmethod
     def _extract_user_id(payload: dict) -> str:
@@ -268,20 +336,19 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         return ""
 
     @staticmethod
-    def _extract_user_name(payload: dict) -> str:
-        try:
-            incoming_message = dingtalk_stream.ChatbotMessage.from_dict(payload)
-            for attr in ("sender_nick", "senderNick", "sender_name", "senderName", "sender_staff_name", "senderStaffName"):
-                value = getattr(incoming_message, attr, None)
-                if value:
-                    return str(value)
-        except Exception:
-            pass
-        for key in ("senderNick", "sender_nick", "senderName", "sender_name", "senderStaffName"):
+    def _extract_user_name(payload: dict) -> str | None:
+        for key in ("senderNick", "sender_nick", "userName", "user_name"):
             value = payload.get(key)
             if value:
                 return str(value)
-        return ""
+        try:
+            incoming_message = dingtalk_stream.ChatbotMessage.from_dict(payload)
+            value = getattr(incoming_message, "sender_nick", None)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _extract_session_webhook(payload: dict) -> str:
@@ -289,12 +356,13 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             value = payload.get(key)
             if value:
                 return str(value)
-        data = payload.get("data")
-        if isinstance(data, dict):
-            for key in ("sessionWebhook", "session_webhook"):
-                value = data.get(key)
-                if value:
-                    return str(value)
+        try:
+            incoming_message = dingtalk_stream.ChatbotMessage.from_dict(payload)
+            value = getattr(incoming_message, "session_webhook", None)
+            if value:
+                return str(value)
+        except Exception:
+            pass
         return ""
 
 
@@ -302,8 +370,8 @@ def _walk_text_values(value) -> list[str]:
     found: list[str] = []
     if isinstance(value, dict):
         for key, nested in value.items():
-            if key in {"text", "content", "markdown", "title"} and isinstance(nested, str):
-                found.append(nested)
+            if key in {"content", "text", "text_content"} and isinstance(nested, str) and nested.strip():
+                found.append(nested.strip())
             else:
                 found.extend(_walk_text_values(nested))
     elif isinstance(value, list):

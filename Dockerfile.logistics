@@ -26,6 +26,11 @@ COPY shared /app/shared
 COPY apps/cp_bot /app/apps/cp_bot
 COPY apps/split_bot /app/apps/split_bot
 COPY apps/logistics_bot /app/apps/logistics_bot
-RUN mkdir -p /app/apps/cp_bot/downloads /app/apps/split_bot/.bot-workspace
+COPY apps/pinxiang_bot /app/apps/pinxiang_bot
+RUN mkdir -p \
+    /app/files \
+    /app/apps/cp_bot/downloads \
+    /app/apps/split_bot/.bot-workspace \
+    /app/apps/pinxiang_bot/.bot-workspace
 
 CMD ["python", "apps/logistics_bot/main.py"]

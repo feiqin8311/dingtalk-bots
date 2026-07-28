@@ -61,7 +61,10 @@ LINGXING_SSL_VERIFY = os.getenv("LINGXING_SSL_VERIFY", "false").lower() == "true
 
 # Local storage
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR") or str(BASE_DIR / "downloads")
-ADDRESS_BOOK_XLSX_PATH = os.getenv("ADDRESS_BOOK_XLSX_PATH") or str(BASE_DIR / "files" / "全站点地址.xlsx")
+# 同步脚本统一落地：仓库根 files/（见 monorepo files/README.md）
+ADDRESS_BOOK_XLSX_PATH = os.getenv("ADDRESS_BOOK_XLSX_PATH") or str(
+    ROOT_DIR / "files" / "全站点地址.xlsx"
+)
 SMB_USERNAME = os.getenv("SMB_USERNAME", "")
 SMB_PASSWORD = os.getenv("SMB_PASSWORD", "")
 SMB_HOST = os.getenv("SMB_HOST", "")

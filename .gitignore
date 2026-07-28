@@ -3,4 +3,14 @@ __pycache__/
 .env
 .bot-workspace/
 downloads/
-files/
+.DS_Store
+
+# Sync Excel data (local/ops only); keep docs
+files/*
+!files/.gitkeep
+!files/README.md
+
+# pinxiang local run artifacts
+apps/pinxiang_bot/output/*
+!apps/pinxiang_bot/output/.gitkeep
+apps/pinxiang_bot/.bot-workspace/

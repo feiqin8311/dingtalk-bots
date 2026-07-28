@@ -37,6 +37,7 @@ class LogisticsBotConfig:
     client_secret: str
     robot_code: str
     split_workspace: str
+    pinxiang_workspace: str
     stream_ws_ping_interval: int
     stream_ws_ping_timeout: int
     db_host: str
@@ -59,6 +60,7 @@ def load_config_from_env() -> LogisticsBotConfig:
             ROOT_DIR / "apps" / "logistics_bot" / ".env",
             ROOT_DIR / "apps" / "cp_bot" / ".env",
             ROOT_DIR / "apps" / "split_bot" / ".env",
+            ROOT_DIR / "apps" / "pinxiang_bot" / ".env",
             Path.cwd() / ".env",
         ]
     )
@@ -87,6 +89,10 @@ def load_config_from_env() -> LogisticsBotConfig:
         "LOGISTICS_SPLIT_WORKSPACE",
         os.getenv("PDF_SPLIT_WORKSPACE", str(ROOT_DIR / "apps" / "split_bot" / ".bot-workspace")),
     )
+    pinxiang_workspace = os.getenv(
+        "PINXIANG_WORKSPACE",
+        str(ROOT_DIR / "apps" / "pinxiang_bot" / ".bot-workspace"),
+    )
     missing = [
         name
         for name, value in {
@@ -102,6 +108,7 @@ def load_config_from_env() -> LogisticsBotConfig:
         client_secret=client_secret,
         robot_code=robot_code,
         split_workspace=workspace,
+        pinxiang_workspace=pinxiang_workspace,
         stream_ws_ping_interval=_read_positive_int_env("DING_STREAM_WS_PING_INTERVAL", 30),
         stream_ws_ping_timeout=_read_positive_int_env("DING_STREAM_WS_PING_TIMEOUT", 120),
         db_host=os.getenv("DB_HOST", "").strip(),

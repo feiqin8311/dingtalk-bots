@@ -13,14 +13,22 @@ services:
         required: false
       - path: ./apps/split_bot/.env
         required: false
+      - path: ./apps/pinxiang_bot/.env
+        required: false
     environment:
       TZ: Asia/Shanghai
+      # 同步文件统一目录：宿主机 ./files → 容器 /app/files
+      ADDRESS_BOOK_XLSX_PATH: /app/files/全站点地址.xlsx
+      PINXIANG_PRODUCT_INFO_PATH: /app/files/产品信息单证专用.xlsx
+      PINXIANG_WORKSPACE: /app/apps/pinxiang_bot/.bot-workspace
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      - ./files:/app/files:ro
       - ./apps/cp_bot/downloads:/app/apps/cp_bot/downloads
-      - ./apps/cp_bot/files:/app/apps/cp_bot/files:ro
       - ./apps/split_bot/.bot-workspace:/app/apps/split_bot/.bot-workspace
+      - ./apps/pinxiang_bot/.bot-workspace:/app/apps/pinxiang_bot/.bot-workspace
+      - ./apps/pinxiang_bot/templates:/app/apps/pinxiang_bot/templates:ro
     command: ["python", "apps/logistics_bot/main.py"]
 
   dingtalk-cp-bot:
@@ -36,11 +44,12 @@ services:
         required: false
     environment:
       TZ: Asia/Shanghai
+      ADDRESS_BOOK_XLSX_PATH: /app/files/全站点地址.xlsx
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./apps/cp_bot/downloads:/app/downloads
-      - ./apps/cp_bot/files:/app/files:ro
+      - ./files:/app/files:ro
     command: ["python", "app.py"]
 
   dingtalk-split-bot:
