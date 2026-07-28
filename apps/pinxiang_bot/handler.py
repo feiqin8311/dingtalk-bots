@@ -5,7 +5,7 @@ import logging
 import sys
 import time
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -19,11 +19,14 @@ from dingtalk_stream import AckMessage
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent.parent
 SPLIT_DIR = ROOT_DIR / "apps" / "split_bot"
-for path in (str(APP_DIR), str(ROOT_DIR), str(SPLIT_DIR)):
+# pinxiang app dir first so packing/product_info resolve here; never import bare "config"
+for path in (str(SPLIT_DIR), str(ROOT_DIR)):
     if path not in sys.path:
         sys.path.insert(0, path)
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
 
-import config as pinxiang_config  # noqa: E402
+import pinxiang_config  # noqa: E402
 from amazon_packaging import fill_amazon_packaging_file, is_amazon_packaging_workbook  # noqa: E402
 from packing import process_shipment_file, write_packing_workbook  # noqa: E402
 from product_info_source import load_product_specs  # noqa: E402
@@ -52,8 +55,6 @@ class DownloadedFile:
 
 @dataclass
 class PendingLogistics:
-    """物流侧：已出拼箱结果，待确认 / 选运营。"""
-
     packing_result_path: Path
     merge_dir: Path
     shipment_path: Path
@@ -63,8 +64,6 @@ class PendingLogistics:
 
 @dataclass
 class PendingOpsJob:
-    """运营侧：已收到拼箱，待上传亚马逊装箱表。"""
-
     logistics_user_id: str
     logistics_name_hint: str
     packing_result_path: Path
@@ -116,15 +115,12 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
     async def _handle_message(self, incoming_message, user_id: str, raw_payload: dict) -> None:
         message_text = self._extract_message_text(incoming_message, raw_payload)
         self._cleanup_pending()
-
         has_files = bool(collect_download_codes(raw_payload))
 
-        # 运营上传装箱表
         if has_files and user_id in self._pending_ops:
             await self._handle_ops_amazon_upload(incoming_message, user_id, raw_payload)
             return
 
-        # 物流选运营 / 确认 / 取消（纯文本）
         if not has_files:
             if await self._handle_text_commands(user_id, message_text):
                 return
@@ -137,7 +133,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 "拼箱结果出来后：回复【确认】并选择运营转发；运营上传装箱表后机器人填写回传。"
             )
 
-        # 物流上传发货单（若该用户同时是运营且有待办，优先当装箱表）
         download_codes = collect_download_codes(raw_payload)
         file_names = collect_file_names_by_download_code(raw_payload)
         downloaded = await asyncio.get_running_loop().run_in_executor(
@@ -151,7 +146,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             raise MessageFormatError("未识别到 Excel（.xlsx），请重试。")
 
         if is_amazon_packaging_workbook(downloaded.path):
-            # 运营误走物流分支：若有待办则填表
             if user_id in self._pending_ops:
                 await self._fill_and_reply_amazon(user_id, downloaded)
                 return
@@ -220,14 +214,12 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
 
         if normalized in {"取消", "cancel", "取消拼箱"}:
             self._pending_logistics.pop(user_id, None)
-            if user_id in self._pending_ops:
-                self._pending_ops.pop(user_id, None)
+            self._pending_ops.pop(user_id, None)
             await self._send_text(user_id, "已取消本次拼箱任务。")
             return True
 
         pending = self._pending_logistics.get(user_id)
 
-        # 选择运营
         if pending and pending.stage == "select_ops":
             ops = self._match_ops_choice(normalized)
             if ops is None:
@@ -236,7 +228,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             await self._forward_to_ops(user_id, pending, ops)
             return True
 
-        # 确认 → 进入选运营
         if normalized in {"确认", "confirm", "确认拼箱"}:
             if pending is None:
                 raise MessageFormatError("当前没有待确认的拼箱任务，请先上传发货单。")
@@ -244,7 +235,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 raise MessageFormatError("拼箱结果文件丢失，请重新上传发货单。")
             pending.stage = "select_ops"
             pending.updated_at = time.time()
-            await self._send_text(user_id, self._ops_menu_text(prefix="已确认拼箱结果。\n请选择要转发的运营：\n"))
+            await self._send_text(
+                user_id, self._ops_menu_text(prefix="已确认拼箱结果。\n请选择要转发的运营：\n")
+            )
             return True
 
         return False
@@ -256,7 +249,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         packing_bytes = packing_path.read_bytes()
         packing_name = packing_path.name
 
-        # 发给运营：说明 + 拼箱结果
         await self._send_text(
             ops_id,
             f"【不分仓拼箱】物流已审核通过，请处理。\n"
@@ -325,7 +317,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 product_specs=self._load_product_specs_safe(),
             ),
         )
-        # 拼箱结果表只含改箱行；填亚马逊时用 rows（与业务样例一致）
         rows = packing_result.rows
         if not rows:
             raise MessageFormatError("拼箱结果无改箱行，无法填写装箱表。")
@@ -348,7 +339,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         )
         await self._send_text(ops_user_id, "装箱表已填写完成，请查收。")
 
-        # 抄送物流
         try:
             await self._send_file(
                 job.logistics_user_id,
@@ -358,7 +348,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             )
             await self._send_text(
                 job.logistics_user_id,
-                f"运营已完成装箱表填写（文件已抄送）。任务结束。",
+                "运营已完成装箱表填写（文件已抄送）。任务结束。",
             )
         except Exception:
             self.logger.exception("copy filled amazon file to logistics failed")
@@ -374,7 +364,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         return "\n".join(lines).strip()
 
     def _match_ops_choice(self, normalized: str) -> Optional[dict]:
-        # 1 / 1. / 1、
         for i, ops in enumerate(self.ops_users, start=1):
             if normalized == str(i) or normalized.startswith(f"{i}.") or normalized.startswith(f"{i}、"):
                 return ops
@@ -423,7 +412,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         self._pending_ops.pop(user_id, None)
 
     def has_pending(self, user_id: str) -> bool:
-        """供 logistics 路由：有进行中任务则强制进 pinxiang，无需再回菜单 3。"""
         if not user_id:
             return False
         return user_id in self._pending_logistics or user_id in self._pending_ops

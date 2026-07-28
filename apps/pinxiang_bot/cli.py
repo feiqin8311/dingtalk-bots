@@ -12,8 +12,7 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from amazon_export import create_amazon_workbook  # noqa: E402
-from config import AMAZON_TEMPLATE_PATH, PRODUCT_INFO_PATH  # noqa: E402
+from pinxiang_config import PRODUCT_INFO_PATH  # noqa: E402
 from packing import process_shipment_file, write_packing_workbook  # noqa: E402
 from product_info_source import load_product_specs  # noqa: E402
 
@@ -27,7 +26,6 @@ def main(argv: list[str] | None = None) -> int:
         default=APP_DIR / "output",
         help="输出目录（默认 apps/pinxiang_bot/output）",
     )
-    parser.add_argument("--no-amazon", action="store_true", help="不生成亚马逊表")
     args = parser.parse_args(argv)
 
     if not args.shipment.is_file():
@@ -50,14 +48,6 @@ def main(argv: list[str] | None = None) -> int:
         for w in result.warnings:
             print(f"  warn: {w}")
 
-    if not args.no_amazon:
-        amazon_path = args.out_dir / f"Amazon-{args.shipment.stem}.xlsx"
-        create_amazon_workbook(
-            template_source=AMAZON_TEMPLATE_PATH,
-            output_path=amazon_path,
-            result=result,
-        )
-        print(f"亚马逊表: {amazon_path}")
     return 0
 
 
