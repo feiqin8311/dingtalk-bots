@@ -89,6 +89,12 @@ class LogisticsRouterTests(unittest.TestCase):
             "pinxiang",
         )
 
+    def test_pinxiang_pending_ops_choice_not_stolen_by_menu(self):
+        """选运营时回复 1 不得进入发货单核对。"""
+        self.router.pinxiang_handler.has_pending = MagicMock(return_value=True)
+        self.assertEqual(self.router._route({"text": {"content": "1"}}, user_id="u1"), "pinxiang")
+        self.assertEqual(self.router._route({"text": {"content": "2"}}, user_id="u1"), "pinxiang")
+
     def test_first_use_shipment_number_shows_menu(self):
         self.assertEqual(self.router._route({"text": {"content": "SP260204001"}}, user_id="u1"), "help")
 

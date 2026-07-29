@@ -24,15 +24,15 @@ class AmazonPackagingTests(unittest.TestCase):
     def test_expand_boxes(self):
         rows = [
             PackingRow("WH", "80376351F1", "80376351F1", 180, 60, 3, 17.5, 54, 31, 18, "原箱-整数部分"),
-            PackingRow("WH", "80376351F1", "80376351F1", 55, 55, 1, 17.0, 54, 30, 17, "余数改箱"),
-            PackingRow("WH", "801905N", "801905", 20, 20, 1, 9.0, 25, 34, 24, "不足一箱改箱"),
+            PackingRow("WH", "80376351F1", "80376351F1", 55, 55, 1, 17.0, 54, 30, 17, "余数改箱", box_group_id="r1"),
+            PackingRow("WH", "801905N", "801905", 20, 20, 1, 9.0, 25, 34, 24, "不足一箱改箱", box_group_id="r2"),
         ]
         boxes = expand_packing_rows_to_boxes(rows)
         self.assertEqual(len(boxes), 5)
-        self.assertEqual(boxes[0].units, 60)
-        self.assertEqual(boxes[3].units, 55)
-        self.assertEqual(boxes[4].units, 20)
-        self.assertIn("801905", boxes[4].sku_keys)
+        self.assertEqual(boxes[0].lines[0].units, 60)
+        self.assertEqual(boxes[3].lines[0].units, 55)
+        self.assertEqual(boxes[4].lines[0].units, 20)
+        self.assertIn("801905", boxes[4].lines[0].keys)
 
     @unittest.skipUnless(REF.is_file(), "reference amazon packaging file missing")
     def test_fill_reference_shell(self):

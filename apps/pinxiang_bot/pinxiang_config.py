@@ -54,6 +54,7 @@ PENDING_TTL_SEC = int((os.getenv("PINXIANG_PENDING_TTL_SEC") or "600").strip())
 
 # 运营人员（物流确认后选择转发对象）
 # 可用 env 覆盖：PINXIANG_OPS_USERS=袁皓冉:id1,陈潇潇:id2
+# 默认运营；可用 PINXIANG_OPS_USERS 覆盖
 _DEFAULT_OPS = (
     ("袁皓冉", "17839075860894598"),
     ("陈潇潇", "17403614178121993"),

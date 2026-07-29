@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = process_shipment_file(args.shipment, product_specs=product_specs)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    packing_path = args.out_dir / f"拼箱结果-{args.shipment.stem}.xlsx"
+    packing_path = args.out_dir / f"{result.result_basename(fallback=args.shipment.stem)}.xlsx"
     write_packing_workbook(result, packing_path)
     print(f"拼箱结果: {packing_path}  rows={len(result.rows)}")
     if result.warnings:

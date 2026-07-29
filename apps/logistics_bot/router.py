@@ -209,19 +209,19 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         normalized = self._normalize_command(text)
         if normalized in {"重置", "重新开始", "reset"}:
             return "reset"
+        # 拼箱进行中（选运营 1/2、确认、运营上传）优先于全局菜单 1/2/3，
+        # 否则回复「1. 柯鹏翔」会被误判为「1. 发货单核对」
+        if user_id and getattr(self.pinxiang_handler, "has_pending", lambda _u: False)(user_id):
+            return "pinxiang"
+        selected = self._selected_branch_by_user.get(user_id or "")
+        if selected == "pinxiang":
+            return "pinxiang"
         if self._is_menu_choice(normalized, "1"):
             return "select_cp"
         if self._is_menu_choice(normalized, "2"):
             return "select_split"
         if self._is_menu_choice(normalized, "3"):
             return "select_pinxiang"
-        selected = self._selected_branch_by_user.get(user_id or "")
-        # 拼箱进行中（含运营待上传装箱表）强制进 pinxiang，避免运营被菜单拦住
-        if user_id and getattr(self.pinxiang_handler, "has_pending", lambda _u: False)(user_id):
-            return "pinxiang"
-        # pinxiang owns its confirm/cancel/files when selected
-        if selected == "pinxiang":
-            return "pinxiang"
         if selected in {"cp", "split"}:
             if collect_download_codes(payload):
                 return "split"

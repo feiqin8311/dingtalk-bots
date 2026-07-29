@@ -1,16 +1,22 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""不分仓拼箱：独立算法（与 dingtalk-lcl-bot 不同）。
+"""不分仓拼箱算法（与 dingtalk-lcl-bot 独立）。
 
-依据桌面业务说明 + 参考发货单/拼箱样例：
-- 从「装箱信息」判断箱数比 r = 发货数量 / 单箱数量
-- 从「发货单详情」取仓库 / MSKU 等（不同仓库不互拼）
-- 非整箱：整数箱保留原箱规，余数/不足一箱按单箱重体积重算
+箱规硬约束：
+  A. 单箱毛重 1~18 kg
+  B. 非原箱规：长宽高单边 15~60 cm
+  C. 单箱体积 < 10000 cm³ → 长=宽=高=20
+
+箱数比 r = 发货数量 / 单箱数量：
+  r 整数 ≥1 → 原箱（不进拼箱结果表）
+  0 < r < 1 → 不足一箱：重 1~18 单装(B)；重 <1 与同仓轻货合箱(A)
+  r > 1 非整数 → 优先整票拼 1 箱(C，毛重 1~18)；否则整数原箱(D)+余数；余数 <1kg 借 1 箱合并
 """
 
 from __future__ import annotations
 
 import math
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Union
@@ -23,11 +29,10 @@ PathLike = Union[str, Path]
 MIN_BOX_WEIGHT_KG = 1.0
 MAX_BOX_WEIGHT_KG = 18.0
 MIN_SIDE_CM = 15.0
-MAX_SIDE_CM = 62.0
+MAX_SIDE_CM = 60.0
 SMALL_VOLUME_CM3 = 10000.0
 DEFAULT_SIDE_CM = 20.0
 
-# 拼箱结果表列：与业务参考表一致（不含整箱原箱行、不含 MSKU/备注）
 PACKING_HEADERS = (
     "发货仓库",
     "SKU",
@@ -43,8 +48,6 @@ PACKING_HEADERS = (
 
 @dataclass(frozen=True)
 class ProductSpec:
-    """产品主数据（可选）。缺省时用发货单装箱信息字段。"""
-
     sku: str
     units_per_box: Optional[float] = None
     box_weight_kg: Optional[float] = None
@@ -81,6 +84,8 @@ class PackingRow:
     width_cm: float
     height_cm: float
     remark: str = ""
+    # 同一 box_group_id = 同一物理箱（多 SKU 合箱时多行共享）
+    box_group_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -98,15 +103,47 @@ class PackingRow:
 
 @dataclass
 class PackingResult:
-    """rows = 拼箱结果表（仅非整箱需处理行）；all_rows = 含原箱，供亚马逊完整清单。"""
-
     rows: list[PackingRow] = field(default_factory=list)
     all_rows: list[PackingRow] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    shipment_sns: list[str] = field(default_factory=list)
 
     @property
     def amazon_rows(self) -> list[PackingRow]:
         return list(self.all_rows or self.rows)
+
+    def result_basename(self, fallback: str = "未知") -> str:
+        """拼箱结果文件名（无扩展名），如：拼箱 SP1+SP2。"""
+        sns = [s.strip() for s in self.shipment_sns if s and str(s).strip()]
+        if sns:
+            return f"拼箱 {'+'.join(sns)}"
+        return f"拼箱 {fallback}"
+
+
+@dataclass
+class _Partial:
+    """待改箱/合箱的零头或不足一箱。"""
+
+    warehouse: str
+    sku: str
+    msku: str
+    qty: float
+    unit_w: float
+    unit_vol: float
+    orig_l: float
+    orig_w: float
+    orig_h: float
+    orig_units_per_box: float
+    orig_box_weight: float
+    source: str  # under_one | remainder | all_in_one
+
+    @property
+    def weight(self) -> float:
+        return self.unit_w * self.qty
+
+    @property
+    def volume(self) -> float:
+        return self.unit_vol * self.qty
 
 
 def process_shipment_file(
@@ -114,7 +151,6 @@ def process_shipment_file(
     *,
     product_specs: Optional[Mapping[str, ProductSpec]] = None,
 ) -> PackingResult:
-    """读发货单 xlsx，返回拼箱结果。"""
     wb = load_workbook(filename=str(input_path), data_only=True, read_only=True)
     try:
         pack_sheet = _require_sheet(wb, "装箱信息")
@@ -123,43 +159,77 @@ def process_shipment_file(
         detail_rows = list(detail_sheet.iter_rows(values_only=True))
     finally:
         wb.close()
-
     items = _build_line_items(pack_rows, detail_rows, product_specs or {})
     return compute_packing(items)
 
 
 def compute_packing(items: Sequence[LineItem]) -> PackingResult:
     result = PackingResult()
+    # 原箱整票（仅 all_rows）
+    pure_originals: list[PackingRow] = []
+    # D 的整数原箱部分（进结果表，可被借箱）
+    integer_parts: list[PackingRow] = []
+    partials: list[_Partial] = []
+    seen_sn: set[str] = set()
+
     for item in items:
+        sn = (item.shipment_sn or "").strip()
+        if sn and sn not in seen_sn:
+            seen_sn.add(sn)
+            result.shipment_sns.append(sn)
         if item.units_per_box <= 0:
             result.warnings.append(f"{item.sku}: 单箱数量无效，已跳过")
             continue
         ratio = item.qty / item.units_per_box
+        unit_w = item.box_weight_kg / item.units_per_box
+        unit_vol = (item.length_cm * item.width_cm * item.height_cm) / item.units_per_box
+
+        # —— 整箱原箱 ——
         if _is_integer(ratio) and ratio >= 1:
-            # 整箱：不进拼箱结果表（参考表只列需处理行）；仍进 all_rows 供亚马逊
-            row = PackingRow(
-                warehouse=item.warehouse,
-                sku=item.sku,
-                msku=item.msku or item.sku,
-                qty=item.qty,
-                units_per_box=item.units_per_box,
-                box_count=ratio,
-                box_weight_kg=item.box_weight_kg,
-                length_cm=item.length_cm,
-                width_cm=item.width_cm,
-                height_cm=item.height_cm,
-                remark="原箱",
+            pure_originals.append(
+                PackingRow(
+                    warehouse=item.warehouse,
+                    sku=item.sku,
+                    msku=item.msku or item.sku,
+                    qty=item.qty,
+                    units_per_box=item.units_per_box,
+                    box_count=ratio,
+                    box_weight_kg=item.box_weight_kg,
+                    length_cm=item.length_cm,
+                    width_cm=item.width_cm,
+                    height_cm=item.height_cm,
+                    remark="原箱",
+                )
             )
-            result.all_rows.append(row)
             continue
 
+        # —— >1 非整数：优先 C 整票拼 1 箱（毛重 1~18），否则 D 拆整数+余数 ——
         if ratio > 1:
+            all_weight = unit_w * item.qty
+            if MIN_BOX_WEIGHT_KG <= all_weight <= MAX_BOX_WEIGHT_KG:
+                partials.append(
+                    _Partial(
+                        warehouse=item.warehouse,
+                        sku=item.sku,
+                        msku=item.msku or item.sku,
+                        qty=item.qty,
+                        unit_w=unit_w,
+                        unit_vol=unit_vol,
+                        orig_l=item.length_cm,
+                        orig_w=item.width_cm,
+                        orig_h=item.height_cm,
+                        orig_units_per_box=item.units_per_box,
+                        orig_box_weight=item.box_weight_kg,
+                        source="all_in_one",
+                    )
+                )
+                continue
+
             full_boxes = int(math.floor(ratio))
             full_qty = full_boxes * item.units_per_box
             rem_qty = item.qty - full_qty
-            chunk: list[PackingRow] = []
             if full_boxes > 0:
-                chunk.append(
+                integer_parts.append(
                     PackingRow(
                         warehouse=item.warehouse,
                         sku=item.sku,
@@ -175,24 +245,55 @@ def compute_packing(items: Sequence[LineItem]) -> PackingResult:
                     )
                 )
             if rem_qty > 0:
-                chunk.append(_repack_partial(item, rem_qty, remark="余数改箱"))
-            result.rows.extend(chunk)
-            result.all_rows.extend(chunk)
+                partials.append(
+                    _Partial(
+                        warehouse=item.warehouse,
+                        sku=item.sku,
+                        msku=item.msku or item.sku,
+                        qty=rem_qty,
+                        unit_w=unit_w,
+                        unit_vol=unit_vol,
+                        orig_l=item.length_cm,
+                        orig_w=item.width_cm,
+                        orig_h=item.height_cm,
+                        orig_units_per_box=item.units_per_box,
+                        orig_box_weight=item.box_weight_kg,
+                        source="remainder",
+                    )
+                )
             continue
 
+        # —— <1 不足一箱 ——
         if 0 < ratio < 1:
-            row = _repack_partial(item, item.qty, remark="不足一箱改箱")
-            result.rows.append(row)
-            result.all_rows.append(row)
+            partials.append(
+                _Partial(
+                    warehouse=item.warehouse,
+                    sku=item.sku,
+                    msku=item.msku or item.sku,
+                    qty=item.qty,
+                    unit_w=unit_w,
+                    unit_vol=unit_vol,
+                    orig_l=item.length_cm,
+                    orig_w=item.width_cm,
+                    orig_h=item.height_cm,
+                    orig_units_per_box=item.units_per_box,
+                    orig_box_weight=item.box_weight_kg,
+                    source="under_one",
+                )
+            )
             continue
 
         result.warnings.append(f"{item.sku}: 发货数量异常 qty={item.qty}")
 
-    # 余数箱毛重 < 1kg：从整数箱借一箱再并（同 SKU）；同步更新 all_rows 中对应改箱行
-    result.rows = _borrow_full_box_if_too_light(result.rows)
-    # all_rows：原箱保留 + 改箱行用处理后的 rows 替换
-    originals = [r for r in result.all_rows if r.remark == "原箱"]
-    result.all_rows = originals + list(result.rows)
+    # D 备注：余数毛重 <1 → 从同 SKU 整数箱借 1 箱
+    integer_parts, partials, borrow_rows = _apply_borrow_from_integer(integer_parts, partials)
+
+    # 分类处理 partials：B 单装 / A 合箱 / 超重告警
+    changed_rows: list[PackingRow] = list(integer_parts) + list(borrow_rows)
+    changed_rows.extend(_pack_partials_by_warehouse(partials, result.warnings))
+
+    result.rows = changed_rows
+    result.all_rows = pure_originals + list(changed_rows)
     return result
 
 
@@ -229,130 +330,210 @@ def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path
     return path
 
 
-# --- internals ---
+# --- 合箱 / 借箱 ---
 
 
-def _repack_partial(item: LineItem, qty: float, *, remark: str) -> PackingRow:
-    unit_w = item.box_weight_kg / item.units_per_box if item.units_per_box else 0.0
-    unit_vol = (item.length_cm * item.width_cm * item.height_cm) / item.units_per_box if item.units_per_box else 0.0
-    box_weight = unit_w * qty
-    box_vol = unit_vol * qty
-    length, width, height = _dims_for_volume(box_vol, item.length_cm, item.width_cm, item.height_cm)
-    return PackingRow(
-        warehouse=item.warehouse,
-        sku=item.sku,
-        msku=item.msku or item.sku,
-        qty=qty,
-        units_per_box=qty,
-        box_count=1.0,
-        box_weight_kg=box_weight,
-        length_cm=length,
-        width_cm=width,
-        height_cm=height,
-        remark=remark,
-    )
+def _apply_borrow_from_integer(
+    integer_parts: list[PackingRow],
+    partials: list[_Partial],
+) -> tuple[list[PackingRow], list[_Partial], list[PackingRow]]:
+    """余数/改箱毛重 <1kg：同 SKU 从整数原箱借 1 箱合并成一箱非原箱规。"""
+    parts = list(integer_parts)
+    left: list[_Partial] = []
+    borrowed: list[PackingRow] = []
 
-
-def _dims_for_volume(volume_cm3: float, orig_l: float, orig_w: float, orig_h: float) -> tuple[float, float, float]:
-    """非原箱规尺寸：小体积用 20³；否则固定原长宽推高，并夹到 15~62。"""
-    if volume_cm3 <= 0:
-        return (
-            _clamp_side(orig_l or DEFAULT_SIDE_CM),
-            _clamp_side(orig_w or DEFAULT_SIDE_CM),
-            _clamp_side(orig_h or DEFAULT_SIDE_CM),
-        )
-    if volume_cm3 < SMALL_VOLUME_CM3:
-        return DEFAULT_SIDE_CM, DEFAULT_SIDE_CM, DEFAULT_SIDE_CM
-
-    length = _clamp_side(orig_l or DEFAULT_SIDE_CM)
-    width = _clamp_side(orig_w or DEFAULT_SIDE_CM)
-    height = volume_cm3 / (length * width) if length * width else DEFAULT_SIDE_CM
-    if MIN_SIDE_CM <= height <= MAX_SIDE_CM:
-        return _round1(length), _round1(width), _round1(height)
-
-    # 高度越界时退回 20×20 推高，再夹边
-    length = width = DEFAULT_SIDE_CM
-    height = volume_cm3 / (length * width)
-    height = _clamp_side(height)
-    # 若仍无法用 20×20 容纳，略调长宽
-    if height >= MAX_SIDE_CM and volume_cm3 > MAX_SIDE_CM * length * width:
-        side = math.ceil(volume_cm3 ** (1.0 / 3.0))
-        side = _clamp_side(float(side))
-        return side, side, _clamp_side(volume_cm3 / (side * side))
-    return _round1(length), _round1(width), _round1(height)
-
-
-def _borrow_full_box_if_too_light(rows: list[PackingRow]) -> list[PackingRow]:
-    """若余数/改箱毛重 < 1kg，且同 SKU 有整数原箱，则借 1 箱合并。"""
-    by_sku: dict[str, list[int]] = {}
-    for idx, row in enumerate(rows):
-        by_sku.setdefault(row.sku, []).append(idx)
-
-    drop: set[int] = set()
-    extras: list[PackingRow] = []
-
-    for sku, indices in by_sku.items():
-        light_idxs = [
-            i
-            for i in indices
-            if rows[i].remark in {"余数改箱", "不足一箱改箱"} and rows[i].box_weight_kg < MIN_BOX_WEIGHT_KG
-        ]
-        full_idxs = [i for i in indices if rows[i].remark in {"原箱-整数部分", "原箱"} and rows[i].box_count >= 1]
-        if not light_idxs or not full_idxs:
+    for p in partials:
+        if p.weight >= MIN_BOX_WEIGHT_KG or p.source != "remainder":
+            left.append(p)
             continue
-        light_i = light_idxs[0]
-        full_i = full_idxs[0]
-        full = rows[full_i]
-        light = rows[light_i]
-        if full.box_count < 1:
+        # 找同 SKU 整数箱
+        idx = next((i for i, row in enumerate(parts) if row.sku == p.sku and row.box_count >= 1), None)
+        if idx is None:
+            left.append(p)
             continue
+        full = parts[idx]
         unit = full.units_per_box
-        # 借走 1 箱
-        new_full_count = full.box_count - 1
-        merged_qty = light.qty + unit
-        unit_w = full.box_weight_kg  # 原箱单箱重
-        # 合并后按单品重估算：原箱单箱重/原单箱数量 * 合并数量
-        unit_item_w = unit_w / unit if unit else 0.0
-        unit_vol = (full.length_cm * full.width_cm * full.height_cm) / unit if unit else 0.0
-        merged_weight = unit_item_w * merged_qty
-        length, width, height = _dims_for_volume(unit_vol * merged_qty, full.length_cm, full.width_cm, full.height_cm)
-
-        drop.add(light_i)
-        if new_full_count <= 0:
-            drop.add(full_i)
+        new_count = full.box_count - 1
+        merged_qty = p.qty + unit
+        unit_w = full.box_weight_kg / unit if unit else p.unit_w
+        unit_vol = (full.length_cm * full.width_cm * full.height_cm) / unit if unit else p.unit_vol
+        weight = unit_w * merged_qty
+        vol = unit_vol * merged_qty
+        length, width, height = _dims_non_original(vol)
+        if new_count <= 0:
+            parts.pop(idx)
         else:
-            rows[full_i] = PackingRow(
+            parts[idx] = PackingRow(
                 warehouse=full.warehouse,
                 sku=full.sku,
                 msku=full.msku,
-                qty=new_full_count * unit,
+                qty=new_count * unit,
                 units_per_box=unit,
-                box_count=new_full_count,
+                box_count=new_count,
                 box_weight_kg=full.box_weight_kg,
                 length_cm=full.length_cm,
                 width_cm=full.width_cm,
                 height_cm=full.height_cm,
                 remark=full.remark,
             )
-        extras.append(
+        gid = uuid.uuid4().hex[:8]
+        borrowed.append(
             PackingRow(
-                warehouse=light.warehouse,
-                sku=light.sku,
-                msku=light.msku,
+                warehouse=p.warehouse,
+                sku=p.sku,
+                msku=p.msku,
                 qty=merged_qty,
                 units_per_box=merged_qty,
                 box_count=1.0,
-                box_weight_kg=merged_weight,
+                box_weight_kg=weight,
                 length_cm=length,
                 width_cm=width,
                 height_cm=height,
                 remark="借箱合并",
+                box_group_id=gid,
             )
         )
+    return parts, left, borrowed
 
-    out = [row for i, row in enumerate(rows) if i not in drop]
-    out.extend(extras)
+
+def _pack_partials_by_warehouse(partials: list[_Partial], warnings: list[str]) -> list[PackingRow]:
+    """同仓库：B 单装(1~18kg)；A 轻货合箱(<1kg)；>18 告警仍单装。"""
+    by_wh: dict[str, list[_Partial]] = {}
+    for p in partials:
+        by_wh.setdefault(p.warehouse, []).append(p)
+
+    out: list[PackingRow] = []
+    for warehouse, group in by_wh.items():
+        singles: list[_Partial] = []
+        lights: list[_Partial] = []
+        for p in group:
+            w = p.weight
+            if w < MIN_BOX_WEIGHT_KG:
+                lights.append(p)
+            elif w > MAX_BOX_WEIGHT_KG:
+                warnings.append(
+                    f"{p.sku}: 改箱毛重 {w:.2f}kg 超过 {MAX_BOX_WEIGHT_KG}kg，仍按一箱输出请人工核对"
+                )
+                singles.append(p)
+            else:
+                singles.append(p)
+
+        # B：单装
+        for p in singles:
+            out.append(_partial_to_solo_row(p, remark=_remark_for_solo(p)))
+
+        # A：轻货贪心合箱（同仓，目标合计 1~18kg）
+        lights.sort(key=lambda x: x.weight)
+        bins: list[list[_Partial]] = []
+        for p in lights:
+            placed = False
+            for b in bins:
+                total = sum(x.weight for x in b) + p.weight
+                if total <= MAX_BOX_WEIGHT_KG:
+                    b.append(p)
+                    placed = True
+                    break
+            if not placed:
+                bins.append([p])
+
+        for b in bins:
+            total_w = sum(x.weight for x in b)
+            # 合完仍 <1：告警，仍输出（人工处理）
+            if total_w < MIN_BOX_WEIGHT_KG:
+                warnings.append(
+                    f"仓库[{warehouse}] 合箱后毛重仍 <{MIN_BOX_WEIGHT_KG}kg："
+                    + ",".join(x.sku for x in b)
+                )
+            if len(b) == 1:
+                out.append(_partial_to_solo_row(b[0], remark=_remark_for_solo(b[0])))
+            else:
+                out.extend(_partials_to_mixed_rows(b))
     return out
+
+
+def _remark_for_solo(p: _Partial) -> str:
+    if p.source == "all_in_one":
+        return "整票拼1箱"
+    if p.source == "remainder":
+        return "余数改箱"
+    return "不足一箱改箱"
+
+
+def _partial_to_solo_row(p: _Partial, *, remark: str) -> PackingRow:
+    length, width, height = _dims_non_original(p.volume)
+    gid = uuid.uuid4().hex[:8]
+    return PackingRow(
+        warehouse=p.warehouse,
+        sku=p.sku,
+        msku=p.msku,
+        qty=p.qty,
+        units_per_box=p.qty,
+        box_count=1.0,
+        box_weight_kg=p.weight,
+        length_cm=length,
+        width_cm=width,
+        height_cm=height,
+        remark=remark,
+        box_group_id=gid,
+    )
+
+
+def _partials_to_mixed_rows(group: list[_Partial]) -> list[PackingRow]:
+    """多 SKU 同一物理箱：多行共享 box_group_id / 箱规 / 总毛重。"""
+    total_w = sum(p.weight for p in group)
+    total_v = sum(p.volume for p in group)
+    length, width, height = _dims_non_original(total_v)
+    gid = uuid.uuid4().hex[:8]
+    rows: list[PackingRow] = []
+    for p in group:
+        rows.append(
+            PackingRow(
+                warehouse=p.warehouse,
+                sku=p.sku,
+                msku=p.msku,
+                qty=p.qty,
+                units_per_box=p.qty,
+                box_count=1.0,
+                box_weight_kg=total_w,  # 同箱总重写在每行，便于结果表阅读
+                length_cm=length,
+                width_cm=width,
+                height_cm=height,
+                remark="多SKU合箱",
+                box_group_id=gid,
+            )
+        )
+    return rows
+
+
+def _dims_non_original(volume_cm3: float) -> tuple[float, float, float]:
+    """非原箱规尺寸：体积<10000→20³；否则长=宽=20 推高，越界再调长宽，夹在 15~60。"""
+    if volume_cm3 <= 0:
+        return DEFAULT_SIDE_CM, DEFAULT_SIDE_CM, DEFAULT_SIDE_CM
+    if volume_cm3 < SMALL_VOLUME_CM3:
+        return DEFAULT_SIDE_CM, DEFAULT_SIDE_CM, DEFAULT_SIDE_CM
+
+    length = width = DEFAULT_SIDE_CM
+    height = volume_cm3 / (length * width)
+    if MIN_SIDE_CM <= height <= MAX_SIDE_CM:
+        return _round1(length), _round1(width), _round1(height)
+
+    if height > MAX_SIDE_CM:
+        # 放大底面积使高=60
+        area = volume_cm3 / MAX_SIDE_CM
+        side = math.sqrt(max(area, MIN_SIDE_CM * MIN_SIDE_CM))
+        side = _clamp_side(side)
+        h2 = volume_cm3 / (side * side)
+        return _round1(side), _round1(side), _round1(_clamp_side(h2))
+
+    # height < MIN：略缩小底边（不低于 15）
+    area = volume_cm3 / MIN_SIDE_CM
+    side = math.sqrt(max(area, MIN_SIDE_CM * MIN_SIDE_CM))
+    side = _clamp_side(side)
+    h2 = volume_cm3 / (side * side)
+    return _round1(side), _round1(side), _round1(_clamp_side(h2))
+
+
+# --- 读表 ---
 
 
 def _build_line_items(
@@ -429,7 +610,6 @@ def _build_line_items(
         width = _to_float(_get(raw, pack_idx, "箱子宽度（cm）"))
         height = _to_float(_get(raw, pack_idx, "箱子高度（cm）"))
 
-        # 产品表常以 MSKU/裸 SKU 建档（如发货 SKU=801905N，表内=801905）
         spec = product_specs.get(sku) or product_specs.get(msku)
         if spec:
             units = spec.units_per_box if spec.units_per_box is not None else units

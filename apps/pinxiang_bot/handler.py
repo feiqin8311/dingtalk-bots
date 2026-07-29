@@ -167,7 +167,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             None,
             partial(process_shipment_file, shipment.path, product_specs=product_specs),
         )
-        packing_name = f"拼箱结果-{Path(shipment.file_name).stem}.xlsx"
+        packing_name = f"{result.result_basename(fallback=Path(shipment.file_name).stem)}.xlsx"
         packing_path = job_dir / packing_name
         await asyncio.get_running_loop().run_in_executor(
             None, partial(write_packing_workbook, result, packing_path)
@@ -251,10 +251,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
 
         await self._send_text(
             ops_id,
-            f"【不分仓拼箱】物流已审核通过，请处理。\n"
-            f"来源物流用户：{logistics_user_id}\n"
-            f"请下载拼箱结果核对后，上传亚马逊「包装箱包装信息」Excel，"
-            f"机器人将自动填写并回传。",
+            "【不分仓拼箱】物流已审核通过，请处理。\n"
+            "请下载拼箱结果核对后，上传亚马逊「包装箱包装信息」Excel，"
+            "机器人将自动填写并回传。",
         )
         await self._send_file(
             ops_id,
@@ -321,10 +320,11 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         if not rows:
             raise MessageFormatError("拼箱结果无改箱行，无法填写装箱表。")
 
-        out_name = f"已填写-{amazon_file.file_name}"
-        if not out_name.lower().endswith(".xlsx"):
-            out_name += ".xlsx"
-        out_path = job.merge_dir / out_name
+        # 回传文件名与运营上传的亚马逊表保持完全一致
+        out_name = amazon_file.file_name or "包装箱包装信息.xlsx"
+        if not out_name.lower().endswith((".xlsx", ".xlsm")):
+            out_name = f"{out_name}.xlsx"
+        out_path = job.merge_dir / f"filled-{out_name}"
 
         await asyncio.get_running_loop().run_in_executor(
             None,
@@ -338,21 +338,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         await self._send_text(ops_user_id, "装箱表已填写完成，请查收。")
-
-        try:
-            await self._send_file(
-                job.logistics_user_id,
-                out_name,
-                out_path.read_bytes(),
-                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-            await self._send_text(
-                job.logistics_user_id,
-                "运营已完成装箱表填写（文件已抄送）。任务结束。",
-            )
-        except Exception:
-            self.logger.exception("copy filled amazon file to logistics failed")
-
+        # 不抄送物流：只回传给上传装箱表的运营
         self._pending_ops.pop(ops_user_id, None)
 
     def _ops_menu_text(self, *, prefix: str = "") -> str:

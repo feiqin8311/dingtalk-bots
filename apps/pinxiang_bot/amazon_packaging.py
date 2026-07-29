@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-import math
 import shutil
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence, Union
 
@@ -19,48 +19,82 @@ PathLike = Union[str, Path]
 CM_TO_INCH = 0.393701
 KG_TO_LB = 2.20462
 SHEET_NAME = "包装箱包装信息"
-START_COL = 13  # 包装箱 1 数量
+START_COL = 13
 SKU_HEADER_ROW = 5
 SKU_DATA_START_ROW = 6
 
 
 @dataclass
-class BoxPlan:
-    """单箱计划（全局第 n 个包装箱）。"""
-
-    sku_keys: set[str]  # 可匹配的 SKU / MSKU
+class BoxSkuLine:
+    keys: set[str]
     units: int
-    weight_lb: float
-    width_in: float  # 亚马逊表：宽/长/高 行顺序与参考一致
-    length_in: float
-    height_in: float
+
+
+@dataclass
+class BoxPlan:
+    """一个物理包装箱，可含多 SKU（合箱）。"""
+
+    lines: list[BoxSkuLine] = field(default_factory=list)
+    weight_lb: float = 0.0
+    width_in: float = 0.0
+    length_in: float = 0.0
+    height_in: float = 0.0
 
 
 def expand_packing_rows_to_boxes(rows: Sequence[PackingRow]) -> list[BoxPlan]:
-    """每条拼箱结果行按箱数展开为独立包装箱。"""
+    """拼箱行 → 物理箱列表。同 box_group_id 合并为一箱；原箱-整数部分按箱数展开。"""
     boxes: list[BoxPlan] = []
+    grouped: "OrderedDict[str, list[PackingRow]]" = OrderedDict()
+    solo_order: list[PackingRow] = []
+
     for row in rows:
+        gid = (row.box_group_id or "").strip()
+        if gid:
+            grouped.setdefault(gid, []).append(row)
+        else:
+            solo_order.append(row)
+
+    # 先输出无 group 的（整数原箱多箱展开）
+    for row in solo_order:
         n_boxes = int(round(row.box_count)) if row.box_count else 1
         n_boxes = max(n_boxes, 1)
         units = int(round(row.units_per_box))
         keys = {str(row.sku).strip(), str(row.msku or "").strip()}
         keys.discard("")
         weight_lb = round(float(row.box_weight_kg) * KG_TO_LB, 10)
-        # 参考表：宽度行=宽(cm)，长度行=长(cm)
         width_in = round(float(row.width_cm) * CM_TO_INCH, 10)
         length_in = round(float(row.length_cm) * CM_TO_INCH, 10)
         height_in = round(float(row.height_cm) * CM_TO_INCH, 10)
         for _ in range(n_boxes):
             boxes.append(
                 BoxPlan(
-                    sku_keys=set(keys),
-                    units=units,
+                    lines=[BoxSkuLine(keys=set(keys), units=units)],
                     weight_lb=weight_lb,
                     width_in=width_in,
                     length_in=length_in,
                     height_in=height_in,
                 )
             )
+
+    # 合箱：同 group 一物理箱
+    for _gid, members in grouped.items():
+        lines: list[BoxSkuLine] = []
+        for row in members:
+            keys = {str(row.sku).strip(), str(row.msku or "").strip()}
+            keys.discard("")
+            units = int(round(row.qty if row.box_count == 1 else row.units_per_box))
+            lines.append(BoxSkuLine(keys=keys, units=max(units, 0)))
+        # 同箱总重/尺寸取第一行（合箱时各行已写相同值）
+        head = members[0]
+        boxes.append(
+            BoxPlan(
+                lines=lines,
+                weight_lb=round(float(head.box_weight_kg) * KG_TO_LB, 10),
+                width_in=round(float(head.width_cm) * CM_TO_INCH, 10),
+                length_in=round(float(head.length_cm) * CM_TO_INCH, 10),
+                height_in=round(float(head.height_cm) * CM_TO_INCH, 10),
+            )
+        )
     return boxes
 
 
@@ -69,7 +103,6 @@ def fill_amazon_packaging_file(
     packing_rows: Sequence[PackingRow],
     output_path: PathLike,
 ) -> Path:
-    """复制运营上传的表，按拼箱结果写入箱列与箱规。"""
     src = Path(amazon_path)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -86,15 +119,12 @@ def fill_amazon_packaging_file(
     ws = wb[SHEET_NAME]
 
     total = len(boxes)
-    # 包装箱总数（参考：C3 旁 M3 / 第 13 列）
     ws.cell(3, START_COL, total)
 
-    # 表头与箱名
     for idx in range(total):
         col = START_COL + idx
         ws.cell(SKU_HEADER_ROW, col, f"包装箱 {idx + 1} 数量")
 
-    # 找到规格区起始行：含「包装箱名称」
     name_row = _find_row_by_label(ws, "包装箱名称")
     weight_row = _find_row_by_label(ws, "包装箱重量")
     width_row = _find_row_by_label(ws, "包装箱宽度")
@@ -116,7 +146,6 @@ def fill_amazon_packaging_file(
         if height_row:
             ws.cell(height_row, col, box.height_in)
 
-    # SKU 数据行：清旧箱列并写入
     sku_end = name_row - 1 if name_row else ws.max_row
     data_rows: list[tuple[int, str]] = []
     for r in range(SKU_DATA_START_ROW, sku_end + 1):
@@ -127,7 +156,6 @@ def fill_amazon_packaging_file(
             break
         data_rows.append((r, str(sku).strip()))
 
-    # 清空动态箱区
     for r, _ in data_rows:
         for idx in range(max(total, 20)):
             ws.cell(r, START_COL + idx, None)
@@ -135,10 +163,10 @@ def fill_amazon_packaging_file(
     for r, amazon_sku in data_rows:
         packed = 0
         for idx, box in enumerate(boxes):
-            if _sku_matches(amazon_sku, box.sku_keys):
-                ws.cell(r, START_COL + idx, box.units)
-                packed += box.units
-        # 装箱数量 = 各箱合计（参考中等于预计数量）
+            units = _units_for_sku(amazon_sku, box)
+            if units:
+                ws.cell(r, START_COL + idx, units)
+                packed += units
         expected = ws.cell(r, 10).value
         ws.cell(r, 11, packed if packed else expected)
 
@@ -154,6 +182,13 @@ def is_amazon_packaging_workbook(path: PathLike) -> bool:
         return ok
     except Exception:
         return False
+
+
+def _units_for_sku(amazon_sku: str, box: BoxPlan) -> int:
+    for line in box.lines:
+        if _sku_matches(amazon_sku, line.keys):
+            return line.units
+    return 0
 
 
 def _find_row_by_label(ws, prefix: str) -> int | None:
