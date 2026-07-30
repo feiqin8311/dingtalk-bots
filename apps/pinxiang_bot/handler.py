@@ -65,6 +65,9 @@ class PendingLogistics:
     shipment_path: Path
     stage: str  # confirm | select_ops
     updated_at: float
+    logistics_channel: str = ""
+    store_name: str = ""
+    country: str = ""
 
 
 @dataclass
@@ -75,6 +78,9 @@ class PendingOpsJob:
     merge_dir: Path
     shipment_path: Path
     updated_at: float
+    logistics_channel: str = ""
+    store_name: str = ""
+    country: str = ""
 
 
 class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
@@ -195,6 +201,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 shipment_path=shipment_copy,
                 stage="confirm",
                 updated_at=time.time(),
+                logistics_channel=result.logistics_channel or "",
+                store_name=result.store_name or "",
+                country=result.country or "",
             ),
         )
 
@@ -292,8 +301,10 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         await self._send_text(
             ops_id,
             "【不分仓拼箱】物流已审核通过，请处理。\n"
-            "请下载拼箱结果核对后，上传亚马逊「包装箱包装信息」Excel，"
-            "机器人将自动填写并回传。",
+            "请下载拼箱结果核对后，上传亚马逊模板文件，机器人将自动填写并回传。\n"
+            f"物流渠道：{pending.logistics_channel or ''}\n"
+            f"店铺：{pending.store_name or ''}\n"
+            f"国家：{pending.country or ''}",
         )
         await self._send_file(
             ops_id,
@@ -310,6 +321,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 merge_dir=pending.merge_dir,
                 shipment_path=pending.shipment_path,
                 updated_at=time.time(),
+                logistics_channel=pending.logistics_channel or "",
+                store_name=pending.store_name or "",
+                country=pending.country or "",
             )
             self._pending_logistics.pop(logistics_user_id, None)
             self._save_pending_state_unlocked()
@@ -540,6 +554,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                         "shipment_path": str(p.shipment_path),
                         "stage": p.stage,
                         "updated_at": p.updated_at,
+                        "logistics_channel": p.logistics_channel,
+                        "store_name": p.store_name,
+                        "country": p.country,
                     }
                     for uid, p in self._pending_logistics.items()
                 },
@@ -551,6 +568,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                         "merge_dir": str(j.merge_dir),
                         "shipment_path": str(j.shipment_path),
                         "updated_at": j.updated_at,
+                        "logistics_channel": j.logistics_channel,
+                        "store_name": j.store_name,
+                        "country": j.country,
                     }
                     for uid, j in self._pending_ops.items()
                 },
@@ -573,6 +593,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 shipment_path=Path(str(item["shipment_path"])),
                 stage=stage,
                 updated_at=float(item.get("updated_at") or 0),
+                logistics_channel=str(item.get("logistics_channel") or ""),
+                store_name=str(item.get("store_name") or ""),
+                country=str(item.get("country") or ""),
             )
         except Exception:
             return None
@@ -587,6 +610,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 merge_dir=Path(str(item["merge_dir"])),
                 shipment_path=Path(str(item["shipment_path"])),
                 updated_at=float(item.get("updated_at") or 0),
+                logistics_channel=str(item.get("logistics_channel") or ""),
+                store_name=str(item.get("store_name") or ""),
+                country=str(item.get("country") or ""),
             )
         except Exception:
             return None
