@@ -338,7 +338,22 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         await self._send_text(ops_user_id, "装箱表已填写完成，请查收。")
-        # 不抄送物流：只回传给上传装箱表的运营
+        # 装箱表文件只回运营；物流仅收完成通知
+        logistics_uid = (job.logistics_user_id or "").strip()
+        packing_label = job.packing_result_path.name if job.packing_result_path else ""
+        if logistics_uid:
+            ops_name = next(
+                (o["name"] for o in self.ops_users if o.get("user_id") == ops_user_id),
+                ops_user_id,
+            )
+            lines = [
+                "【不分仓拼箱】运营已完成装箱表填写。",
+                f"运营：{ops_name}",
+            ]
+            if packing_label:
+                lines.append(f"拼箱结果：{packing_label}")
+            lines.append("装箱表已回传运营（未抄送文件）。")
+            await self._send_text(logistics_uid, "\n".join(lines))
         self._pending_ops.pop(ops_user_id, None)
 
     def _ops_menu_text(self, *, prefix: str = "") -> str:
