@@ -19,7 +19,7 @@ from . import config
 from .lingxing_helper import delete_shipment_list
 from .file_helper import process_customs_files
 from .processor import PackingBoxProcessor
-from .shipment_registry import extract_shipment_info, register_shipment
+from .shipment_registry import extract_shipment_info
 from .state_manager import WorkflowState, get_state_manager
 from .utils import (
     DingTalkAPI,
@@ -357,51 +357,20 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 robot_code=robot_code
             )
             
-            # 1.1 登记编号并创建共享盘文件夹
+            # 菜单 4 不做发票号登记/共享盘建夹，直接拼箱
             registry_code = None
             shared_folder_path = None
-            shipment_info = None
             try:
                 shipment_info = extract_shipment_info(logistics_file_path)
                 self.logger.info(
-                    f"发货单信息: 店铺={shipment_info.shop}, 国家={shipment_info.country}, "
-                    f"运输方式={shipment_info.transport_method}"
+                    "发货单信息: 店铺=%s, 国家=%s, 运输方式=%s",
+                    shipment_info.shop,
+                    shipment_info.country,
+                    shipment_info.transport_method,
                 )
-                
-                shop_type = shipment_info.get_shop_type()
-                if shop_type:
-                    registry_code, shared_folder_path = register_shipment(shipment_info)
-                    self.logger.info(f"登记编号: {registry_code}, 共享盘文件夹: {shared_folder_path}")
-                    
-                    # 复制发货单到共享盘文件夹（使用原始文件名，不带时间戳）
-                    shared_logistics_path = os.path.join(shared_folder_path, file_name)
-                    shutil.copy2(logistics_file_path, shared_logistics_path)
-                    self.logger.info(f"发货单已复制到共享盘: {shared_logistics_path}")
-                    
-                    # 发送登记成功通知
-                    self._send_text_reply(
-                        f"✅ 登记成功！\n\n"
-                        f"📝 发票号：{registry_code}\n"
-                        f"🏪 店铺：{shipment_info.shop_full}\n"
-                        f"🌍 国家：{shipment_info.country}\n"
-                        f"🚚 运输方式：{shipment_info.transport_method}\n"
-                        f"📂 文件夹：{shared_folder_path}\n\n"
-                        f"发货单已复制到共享盘，正在进行拼箱处理...",
-                        incoming_message
-                    )
-                else:
-                    self.logger.warning(f"不支持的店铺类型: {shipment_info.shop}，跳过登记")
-                    self._send_text_reply(
-                        f"⚠️ 店铺类型 {shipment_info.shop} 暂不支持自动登记，将继续拼箱处理。",
-                        incoming_message
-                    )
-            except Exception as reg_exc:
-                self.logger.warning(f"登记编号失败（将继续处理）: {reg_exc}")
-                self._send_text_reply(
-                    f"⚠️ 登记失败：{str(reg_exc)}\n但将继续拼箱处理。",
-                    incoming_message
-                )
-            
+            except Exception as info_exc:
+                self.logger.warning("读取发货单摘要失败（忽略）: %s", info_exc)
+
             # 2. 处理文件（拼箱）
             self.logger.info("开始处理拼箱逻辑...")
             timestamp_suffix = self._extract_timestamp_suffix(logistics_file_path)
@@ -437,16 +406,9 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             # 4.1 抄送拼箱结果给OTHER_USERS
             self._send_excel_copy_to_others(media_id, uploaded_file_name, "拼箱结果")
             
-            # 5. 发送确认提示（改为文本说明）
-            registry_info = ""
-            if registry_code and shared_folder_path:
-                registry_info = (
-                    f"\n📝 登记信息：\n"
-                    f"   发票号：{registry_code}\n"
-                    f"   文件夹：{shared_folder_path}\n"
-                )
+            # 5. 发送确认提示
             self._send_text_reply(
-                f"📋 处理结果已发送给您，请查收并确认。{registry_info}\n"
+                "📋 处理结果已发送给您，请查收并确认。\n"
                 "回复【确认】➡️ 选择运营并转发\n"
                 "上传修正版拼箱结果Excel ➡️ 替换当前结果并重新生成Amazon模板\n"
                 "回复【重置】➡️ 放弃本次结果并重新上传发货单",
