@@ -243,12 +243,38 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         return False
 
     async def _forward_to_ops(self, logistics_user_id: str, pending: PendingLogistics, ops: dict) -> None:
+        self._cleanup_pending()
         ops_id = ops["user_id"]
         ops_name = ops["name"]
         packing_path = pending.packing_result_path
-        packing_bytes = packing_path.read_bytes()
         packing_name = packing_path.name
 
+        # 运营同时只接 1 单：已有待办则拒绝，保留物流 select_ops 以便改选他人
+        existing = self._pending_ops.get(ops_id)
+        if existing is not None:
+            busy_label = (
+                existing.packing_result_path.name
+                if existing.packing_result_path
+                else "另一单拼箱任务"
+            )
+            await self._send_text(
+                logistics_user_id,
+                f"运营【{ops_name}】当前已有待处理任务，暂不能接新单。\n"
+                f"进行中：{busy_label}\n\n"
+                "请改选其他运营，或等其完成后再转发。\n"
+                "回复序号/姓名重新选择；回复【取消】放弃本单。",
+            )
+            pending.stage = "select_ops"
+            pending.updated_at = time.time()
+            self.logger.info(
+                "pinxiang forward rejected: ops=%s(%s) busy packing=%s",
+                ops_name,
+                ops_id,
+                busy_label,
+            )
+            return
+
+        packing_bytes = packing_path.read_bytes()
         await self._send_text(
             ops_id,
             "【不分仓拼箱】物流已审核通过，请处理。\n"
