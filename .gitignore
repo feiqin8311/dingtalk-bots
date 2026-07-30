@@ -6,6 +6,7 @@ downloads/
 .DS_Store
 apps/track_notify/.state/
 apps/logistics_bot/.state/
+deploy/deploy.env
 
 # Sync Excel data (local/ops only); keep docs
 files/*

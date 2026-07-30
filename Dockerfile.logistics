@@ -7,6 +7,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Build-time proxy (server: 172.17.0.1:20171 / host.docker.internal:20171)
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
+ARG http_proxy=
+ARG https_proxy=
+ARG NO_PROXY=localhost,127.0.0.1
+ARG no_proxy=localhost,127.0.0.1
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    http_proxy=${http_proxy} \
+    https_proxy=${https_proxy} \
+    NO_PROXY=${NO_PROXY} \
+    no_proxy=${no_proxy}
+
 ARG APT_MIRROR_URL=https://mirrors.aliyun.com
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PIP_FALLBACK_INDEX_URL=https://pypi.org/simple
@@ -17,11 +31,14 @@ RUN cp /etc/apt/sources.list.d/debian.sources /tmp/debian.sources.bak \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# Layer cache: only rebuild when requirements change
 COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip -i ${PIP_INDEX_URL} \
     && (pip install -r /app/requirements.txt -i ${PIP_INDEX_URL} \
         || pip install -r /app/requirements.txt -i ${PIP_FALLBACK_INDEX_URL})
 
+# App code is bind-mounted in compose for day-to-day deploys.
+# Keep a copy in the image so the container still boots without mounts.
 COPY shared /app/shared
 COPY apps/cp_bot /app/apps/cp_bot
 COPY apps/split_bot /app/apps/split_bot

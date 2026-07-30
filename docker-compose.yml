@@ -3,6 +3,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.logistics
+      args:
+        # Server proxy: sing-box on host :20171 (see deploy/deploy.env.example)
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
+        http_proxy: ${BUILD_HTTP_PROXY:-}
+        https_proxy: ${BUILD_HTTPS_PROXY:-}
+        NO_PROXY: ${BUILD_NO_PROXY:-localhost,127.0.0.1}
+        no_proxy: ${BUILD_NO_PROXY:-localhost,127.0.0.1}
     image: dingtalk-bot:latest
     container_name: dingtalk-bot
     restart: unless-stopped
@@ -24,11 +32,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      # Source mounts: rsync + restart, no image rebuild for app code
+      - ./shared:/app/shared:ro
+      - ./apps/logistics_bot:/app/apps/logistics_bot
+      - ./apps/cp_bot:/app/apps/cp_bot
+      - ./apps/split_bot:/app/apps/split_bot
+      - ./apps/pinxiang_bot:/app/apps/pinxiang_bot
       - ./files:/app/files:ro
       - ./apps/cp_bot/downloads:/app/apps/cp_bot/downloads
       - ./apps/split_bot/.bot-workspace:/app/apps/split_bot/.bot-workspace
       - ./apps/pinxiang_bot/.bot-workspace:/app/apps/pinxiang_bot/.bot-workspace
-      - ./apps/pinxiang_bot/templates:/app/apps/pinxiang_bot/templates:ro
       - ./apps/logistics_bot/.state:/app/apps/logistics_bot/.state
     command: ["python", "apps/logistics_bot/main.py"]
 
