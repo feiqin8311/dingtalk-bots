@@ -31,7 +31,11 @@ if str(APP_DIR) not in sys.path:
 import pinxiang_config  # noqa: E402
 from amazon_export import create_amazon_workbook  # noqa: E402
 from amazon_packaging import fill_amazon_packaging_file, is_amazon_packaging_workbook  # noqa: E402
-from packing import process_shipment_file, write_packing_workbook  # noqa: E402
+from packing import (  # noqa: E402
+    load_packing_result_workbook,
+    process_shipment_file,
+    write_packing_workbook,
+)
 from product_info_source import load_product_specs  # noqa: E402
 from runtime import (  # noqa: E402
     MessageDeduplicator,
@@ -170,6 +174,12 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 "这是亚马逊装箱表。请先由物流完成拼箱并转发任务后，再由运营上传此文件。"
             )
 
+        pending = self._pending_logistics.get(user_id)
+        if pending is not None and pending.stage in {"confirm", "select_ops"}:
+            if self._looks_like_packing_result(downloaded.path):
+                await self._handle_modified_packing_result(user_id, downloaded, pending)
+                return
+
         await self._handle_shipment_upload(user_id, downloaded, incoming_message)
 
     async def _handle_shipment_upload(self, user_id: str, shipment: DownloadedFile, incoming_message) -> None:
@@ -235,6 +245,64 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             f"国家：{result.country or ''}"
             f"{warn_text}\n\n"
             "回复【确认】➡️ 选择运营并转发\n"
+            "上传修正版拼箱结果Excel ➡️ 替换当前结果并重新生成Amazon模板\n"
+            "回复【取消】➡️ 放弃本次任务",
+        )
+
+    async def _handle_modified_packing_result(
+        self, user_id: str, uploaded: DownloadedFile, pending: PendingLogistics
+    ) -> None:
+        await self._send_text(user_id, "已收到修正版拼箱结果，正在校验并重新生成 Amazon 模板…")
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, partial(load_packing_result_workbook, uploaded.path)
+        )
+        # 保留发货单里的渠道/店铺/国家与单号（修正表通常不含）
+        result.logistics_channel = pending.logistics_channel or result.logistics_channel
+        result.store_name = pending.store_name or result.store_name
+        result.country = pending.country or result.country
+        if not result.shipment_sns and pending.packing_result_path.is_file():
+            # 尽量从旧文件名还原单号展示
+            stem = pending.packing_result_path.stem.replace(" 拼箱数据", "").strip()
+            if stem:
+                result.shipment_sns = [p for p in stem.split() if p.startswith("SP")]
+
+        packing_name = f"{result.result_basename(fallback=Path(uploaded.file_name).stem)}.xlsx"
+        packing_path = pending.merge_dir / packing_name
+        await asyncio.get_running_loop().run_in_executor(
+            None, partial(write_packing_workbook, result, packing_path)
+        )
+        amazon_template_path = await asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(self._build_amazon_template, pending.merge_dir, result, pinxiang_config.AMAZON_TEMPLATE_MPL),
+        )
+
+        pending.packing_result_path = packing_path
+        pending.amazon_template_path = amazon_template_path
+        pending.stage = "confirm"
+        pending.updated_at = time.time()
+        self._persist_pending_state()
+
+        await self._send_file(
+            user_id,
+            packing_name,
+            packing_path.read_bytes(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        if amazon_template_path and Path(amazon_template_path).is_file():
+            tpl = Path(amazon_template_path)
+            await self._send_file(
+                user_id,
+                tpl.name,
+                tpl.read_bytes(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        await self._send_text(
+            user_id,
+            "✅ 已使用您上传的修正版拼箱结果，并重新生成 Amazon 模板。\n"
+            f"物流渠道：{pending.logistics_channel or ''}\n"
+            f"店铺：{pending.store_name or ''}\n"
+            f"国家：{pending.country or ''}\n\n"
+            "请检查后回复【确认】选择运营并转发，或继续上传新的修正版。\n"
             "回复【取消】➡️ 放弃本次任务",
         )
 
@@ -313,13 +381,13 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         packing_bytes = packing_path.read_bytes()
         template_path = pending.amazon_template_path
         if template_path is None or not Path(template_path).is_file():
-            # 兜底：转发时再生成模板1
+            # 兜底：按当前拼箱结果（含修正版）生成模板1
             packing_result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 partial(
-                    process_shipment_file,
+                    self._load_packing_result_for_template,
+                    pending.packing_result_path,
                     pending.shipment_path,
-                    product_specs=self._load_product_specs_safe(),
                 ),
             )
             template_path = await asyncio.get_running_loop().run_in_executor(
@@ -409,15 +477,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
 
         await self._send_text(ops_user_id, "已收到装箱表，正在按拼箱结果填写，请稍等…")
 
-        packing_result = await asyncio.get_running_loop().run_in_executor(
-            None,
-            partial(
-                process_shipment_file,
-                job.shipment_path,
-                product_specs=self._load_product_specs_safe(),
-            ),
+        rows = await asyncio.get_running_loop().run_in_executor(
+            None, partial(self._load_rows_for_job, job.packing_result_path, job.shipment_path)
         )
-        rows = packing_result.rows
         if not rows:
             raise MessageFormatError("拼箱结果无改箱行，无法填写装箱表。")
 
@@ -465,26 +527,21 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         pending_log = self._pending_logistics.get(user_id)
         pending_ops = self._pending_ops.get(user_id)
         if pending_log is not None:
+            packing_path = pending_log.packing_result_path
             shipment_path = pending_log.shipment_path
             merge_dir = pending_log.merge_dir
             target = "logistics"
         elif pending_ops is not None:
+            packing_path = pending_ops.packing_result_path
             shipment_path = pending_ops.shipment_path
             merge_dir = pending_ops.merge_dir
             target = "ops"
         else:
             raise MessageFormatError("当前没有进行中的拼箱任务，无法生成模板2。")
-        if not shipment_path.is_file():
-            raise MessageFormatError("发货单文件丢失，无法生成模板2。")
 
         await self._send_text(user_id, "正在按当前拼箱结果生成 Amazon 模板2，请稍等…")
         packing_result = await asyncio.get_running_loop().run_in_executor(
-            None,
-            partial(
-                process_shipment_file,
-                shipment_path,
-                product_specs=self._load_product_specs_safe(),
-            ),
+            None, partial(self._load_packing_result_for_template, packing_path, shipment_path)
         )
         template_path = await asyncio.get_running_loop().run_in_executor(
             None,
@@ -523,6 +580,37 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             result=result,
         )
         return out_path
+
+    @staticmethod
+    def _looks_like_packing_result(path: Path) -> bool:
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+            ok = "拼箱结果" in wb.sheetnames
+            wb.close()
+            return ok
+        except Exception:
+            return False
+
+    def _load_rows_for_job(self, packing_path: Path, shipment_path: Path):
+        """优先用当前拼箱结果表（含修正版），否则回退发货单重算。"""
+        if packing_path and Path(packing_path).is_file() and self._looks_like_packing_result(packing_path):
+            return load_packing_result_workbook(packing_path).rows
+        if shipment_path and Path(shipment_path).is_file():
+            return process_shipment_file(
+                shipment_path, product_specs=self._load_product_specs_safe()
+            ).rows
+        return []
+
+    def _load_packing_result_for_template(self, packing_path: Path, shipment_path: Path):
+        if packing_path and Path(packing_path).is_file() and self._looks_like_packing_result(packing_path):
+            return load_packing_result_workbook(packing_path)
+        if shipment_path and Path(shipment_path).is_file():
+            return process_shipment_file(
+                shipment_path, product_specs=self._load_product_specs_safe()
+            )
+        raise MessageFormatError("拼箱结果/发货单文件丢失，无法生成模板。")
 
     def _ops_menu_text(self, *, prefix: str = "") -> str:
         lines = [prefix.rstrip(), ""]

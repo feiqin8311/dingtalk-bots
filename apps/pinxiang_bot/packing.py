@@ -305,6 +305,64 @@ def compute_packing(items: Sequence[LineItem]) -> PackingResult:
     return result
 
 
+def load_packing_result_workbook(input_path: PathLike) -> PackingResult:
+    """读取物流修正后的「拼箱结果」表，用于替换当前结果并重生成 Amazon 模板。"""
+    path = Path(input_path)
+    wb = load_workbook(filename=str(path), data_only=True, read_only=True)
+    try:
+        if "拼箱结果" not in wb.sheetnames:
+            raise ValueError(f"缺少工作表：拼箱结果（现有：{', '.join(wb.sheetnames)}）")
+        ws = wb["拼箱结果"]
+        rows_raw = list(ws.iter_rows(values_only=True))
+    finally:
+        wb.close()
+    if not rows_raw:
+        raise ValueError("拼箱结果表为空")
+    header = [_cell_str(c) for c in rows_raw[0]]
+    idx = _header_index(header)
+    required = ("SKU", "发货数量", "单箱数量", "箱数", "单箱毛重", "长", "宽", "高")
+    missing = [h for h in required if h not in idx]
+    if missing:
+        raise ValueError(f"拼箱结果缺少必要列：{', '.join(missing)}")
+
+    rows: list[PackingRow] = []
+    for raw in rows_raw[1:]:
+        if not raw or all(v is None or str(v).strip() == "" for v in raw):
+            continue
+        sku = _cell_str(_get(raw, idx, "SKU"))
+        if not sku:
+            continue
+        qty = _to_float(_get(raw, idx, "发货数量"))
+        units = _to_float(_get(raw, idx, "单箱数量"))
+        box_count = _to_float(_get(raw, idx, "箱数"))
+        box_w = _to_float(_get(raw, idx, "单箱毛重"))
+        length = _to_float(_get(raw, idx, "长"))
+        width = _to_float(_get(raw, idx, "宽"))
+        height = _to_float(_get(raw, idx, "高"))
+        if qty is None or units is None or box_count is None:
+            raise ValueError(f"SKU {sku} 的发货数量/单箱数量/箱数无效")
+        if units <= 0 or box_count <= 0:
+            raise ValueError(f"SKU {sku} 的单箱数量/箱数必须 > 0")
+        rows.append(
+            PackingRow(
+                warehouse=_cell_str(_get(raw, idx, "发货仓库")) or "未知仓库",
+                sku=sku,
+                msku=sku,
+                qty=float(qty),
+                units_per_box=float(units),
+                box_count=float(box_count),
+                box_weight_kg=float(box_w or 0.0),
+                length_cm=float(length or 0.0),
+                width_cm=float(width or 0.0),
+                height_cm=float(height or 0.0),
+                remark="修正版",
+            )
+        )
+    if not rows:
+        raise ValueError("拼箱结果中没有可用的 SKU 行")
+    return PackingResult(rows=rows, all_rows=list(rows))
+
+
 def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
