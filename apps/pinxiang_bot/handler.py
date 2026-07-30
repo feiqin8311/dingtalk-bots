@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -40,6 +42,9 @@ from Utils.dingtalk_api import (  # noqa: E402
     send_robot_private_file_message,
     send_robot_private_text_message,
 )
+
+# survive process restart / deploy recreate (workspace is bind-mounted)
+_PENDING_STATE_NAME = "pending_state.json"
 
 
 class MessageFormatError(ValueError):
@@ -87,11 +92,14 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         self.workspace.mkdir(parents=True, exist_ok=True)
         self._deduplicator = MessageDeduplicator()
         self._job_semaphore = asyncio.Semaphore(1)
-        self._pending_logistics: dict[str, PendingLogistics] = {}
-        self._pending_ops: dict[str, PendingOpsJob] = {}
+        self._pending_lock = threading.Lock()
+        self._pending_state_path = self.workspace / _PENDING_STATE_NAME
         self._pending_ttl_seconds = int(
             getattr(config, "pinxiang_pending_ttl_sec", pinxiang_config.PENDING_TTL_SEC)
         )
+        self._pending_logistics: dict[str, PendingLogistics] = {}
+        self._pending_ops: dict[str, PendingOpsJob] = {}
+        self._load_pending_state()
         self.ops_users = list(pinxiang_config.OPS_USERS)
 
     async def process(self, callback: dingtalk_stream.CallbackMessage) -> Tuple[str, str]:
@@ -179,12 +187,15 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         else:
             shipment_copy = shipment.path
 
-        self._pending_logistics[user_id] = PendingLogistics(
-            packing_result_path=packing_path,
-            merge_dir=job_dir,
-            shipment_path=shipment_copy,
-            stage="confirm",
-            updated_at=time.time(),
+        self._set_pending_logistics(
+            user_id,
+            PendingLogistics(
+                packing_result_path=packing_path,
+                merge_dir=job_dir,
+                shipment_path=shipment_copy,
+                stage="confirm",
+                updated_at=time.time(),
+            ),
         )
 
         await self._send_file(
@@ -200,9 +211,11 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             warn_text += "\n（本票无非整箱行，拼箱结果表为空。）"
         await self._send_text(
             user_id,
-            "拼箱结果已发送。"
+            "拼箱结果已发送。\n"
+            f"物流渠道：{result.logistics_channel or ''}\n"
+            f"店铺：{result.store_name or ''}\n"
+            f"国家：{result.country or ''}"
             f"{warn_text}\n\n"
-            "请审核：\n"
             "回复【确认】➡️ 选择运营并转发\n"
             "回复【取消】➡️ 放弃本次任务",
         )
@@ -213,8 +226,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             return False
 
         if normalized in {"取消", "cancel", "取消拼箱"}:
-            self._pending_logistics.pop(user_id, None)
-            self._pending_ops.pop(user_id, None)
+            self._drop_user_pending(user_id)
             await self._send_text(user_id, "已取消本次拼箱任务。")
             return True
 
@@ -235,6 +247,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 raise MessageFormatError("拼箱结果文件丢失，请重新上传发货单。")
             pending.stage = "select_ops"
             pending.updated_at = time.time()
+            self._persist_pending_state()
             await self._send_text(
                 user_id, self._ops_menu_text(prefix="已确认拼箱结果。\n请选择要转发的运营：\n")
             )
@@ -266,6 +279,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             )
             pending.stage = "select_ops"
             pending.updated_at = time.time()
+            self._persist_pending_state()
             self.logger.info(
                 "pinxiang forward rejected: ops=%s(%s) busy packing=%s",
                 ops_name,
@@ -288,15 +302,17 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        self._pending_ops[ops_id] = PendingOpsJob(
-            logistics_user_id=logistics_user_id,
-            logistics_name_hint=logistics_user_id,
-            packing_result_path=packing_path,
-            merge_dir=pending.merge_dir,
-            shipment_path=pending.shipment_path,
-            updated_at=time.time(),
-        )
-        self._pending_logistics.pop(logistics_user_id, None)
+        with self._pending_lock:
+            self._pending_ops[ops_id] = PendingOpsJob(
+                logistics_user_id=logistics_user_id,
+                logistics_name_hint=logistics_user_id,
+                packing_result_path=packing_path,
+                merge_dir=pending.merge_dir,
+                shipment_path=pending.shipment_path,
+                updated_at=time.time(),
+            )
+            self._pending_logistics.pop(logistics_user_id, None)
+            self._save_pending_state_unlocked()
 
         await self._send_text(
             logistics_user_id,
@@ -380,7 +396,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 lines.append(f"拼箱结果：{packing_label}")
             lines.append("装箱表已回传运营（未抄送文件）。")
             await self._send_text(logistics_uid, "\n".join(lines))
-        self._pending_ops.pop(ops_user_id, None)
+        with self._pending_lock:
+            self._pending_ops.pop(ops_user_id, None)
+            self._save_pending_state_unlocked()
 
     def _ops_menu_text(self, *, prefix: str = "") -> str:
         lines = [prefix.rstrip(), ""]
@@ -429,19 +447,149 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
 
     def _cleanup_pending(self) -> None:
         cutoff = time.time() - self._pending_ttl_seconds
-        self._pending_logistics = {
-            k: v for k, v in self._pending_logistics.items() if v.updated_at >= cutoff
-        }
-        self._pending_ops = {k: v for k, v in self._pending_ops.items() if v.updated_at >= cutoff}
+        with self._pending_lock:
+            before_l = len(self._pending_logistics)
+            before_o = len(self._pending_ops)
+            self._pending_logistics = {
+                k: v for k, v in self._pending_logistics.items() if v.updated_at >= cutoff
+            }
+            self._pending_ops = {k: v for k, v in self._pending_ops.items() if v.updated_at >= cutoff}
+            if len(self._pending_logistics) != before_l or len(self._pending_ops) != before_o:
+                self._save_pending_state_unlocked()
 
     def clear_user(self, user_id: str) -> None:
-        self._pending_logistics.pop(user_id, None)
-        self._pending_ops.pop(user_id, None)
+        self._drop_user_pending(user_id)
 
     def has_pending(self, user_id: str) -> bool:
         if not user_id:
             return False
+        self._cleanup_pending()
         return user_id in self._pending_logistics or user_id in self._pending_ops
+
+    def _set_pending_logistics(self, user_id: str, pending: PendingLogistics) -> None:
+        with self._pending_lock:
+            self._pending_logistics[user_id] = pending
+            self._save_pending_state_unlocked()
+
+    def _drop_user_pending(self, user_id: str) -> None:
+        if not user_id:
+            return
+        with self._pending_lock:
+            self._pending_logistics.pop(user_id, None)
+            self._pending_ops.pop(user_id, None)
+            self._save_pending_state_unlocked()
+
+    def _persist_pending_state(self) -> None:
+        with self._pending_lock:
+            self._save_pending_state_unlocked()
+
+    def _pending_state_path_resolved(self) -> Path:
+        return self._pending_state_path
+
+    def _load_pending_state(self) -> None:
+        path = self._pending_state_path_resolved()
+        try:
+            if not path.is_file():
+                return
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            cutoff = time.time() - self._pending_ttl_seconds
+            logistics: dict[str, PendingLogistics] = {}
+            for uid, item in (raw.get("logistics") or {}).items():
+                if not uid or not isinstance(item, dict):
+                    continue
+                pending = self._logistics_from_dict(item)
+                if pending is None or pending.updated_at < cutoff:
+                    continue
+                if not pending.packing_result_path.is_file() or not pending.shipment_path.is_file():
+                    continue
+                logistics[str(uid)] = pending
+            ops: dict[str, PendingOpsJob] = {}
+            for uid, item in (raw.get("ops") or {}).items():
+                if not uid or not isinstance(item, dict):
+                    continue
+                job = self._ops_from_dict(item)
+                if job is None or job.updated_at < cutoff:
+                    continue
+                if not job.packing_result_path.is_file() or not job.shipment_path.is_file():
+                    continue
+                ops[str(uid)] = job
+            self._pending_logistics = logistics
+            self._pending_ops = ops
+            if logistics or ops:
+                self.logger.info(
+                    "pinxiang loaded pending state: logistics=%s ops=%s",
+                    len(logistics),
+                    len(ops),
+                )
+        except Exception as exc:
+            self.logger.warning("load pinxiang pending state failed: %s", exc)
+            self._pending_logistics = {}
+            self._pending_ops = {}
+
+    def _save_pending_state_unlocked(self) -> None:
+        path = self._pending_state_path_resolved()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "logistics": {
+                    uid: {
+                        "packing_result_path": str(p.packing_result_path),
+                        "merge_dir": str(p.merge_dir),
+                        "shipment_path": str(p.shipment_path),
+                        "stage": p.stage,
+                        "updated_at": p.updated_at,
+                    }
+                    for uid, p in self._pending_logistics.items()
+                },
+                "ops": {
+                    uid: {
+                        "logistics_user_id": j.logistics_user_id,
+                        "logistics_name_hint": j.logistics_name_hint,
+                        "packing_result_path": str(j.packing_result_path),
+                        "merge_dir": str(j.merge_dir),
+                        "shipment_path": str(j.shipment_path),
+                        "updated_at": j.updated_at,
+                    }
+                    for uid, j in self._pending_ops.items()
+                },
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=0), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as exc:
+            self.logger.warning("save pinxiang pending state failed: %s", exc)
+
+    @staticmethod
+    def _logistics_from_dict(item: dict) -> Optional[PendingLogistics]:
+        try:
+            stage = str(item.get("stage") or "confirm")
+            if stage not in {"confirm", "select_ops"}:
+                stage = "confirm"
+            return PendingLogistics(
+                packing_result_path=Path(str(item["packing_result_path"])),
+                merge_dir=Path(str(item["merge_dir"])),
+                shipment_path=Path(str(item["shipment_path"])),
+                stage=stage,
+                updated_at=float(item.get("updated_at") or 0),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _ops_from_dict(item: dict) -> Optional[PendingOpsJob]:
+        try:
+            return PendingOpsJob(
+                logistics_user_id=str(item.get("logistics_user_id") or ""),
+                logistics_name_hint=str(item.get("logistics_name_hint") or ""),
+                packing_result_path=Path(str(item["packing_result_path"])),
+                merge_dir=Path(str(item["merge_dir"])),
+                shipment_path=Path(str(item["shipment_path"])),
+                updated_at=float(item.get("updated_at") or 0),
+            )
+        except Exception:
+            return None
 
     def _load_product_specs_safe(self) -> dict:
         path = (pinxiang_config.PRODUCT_INFO_PATH or "").strip()

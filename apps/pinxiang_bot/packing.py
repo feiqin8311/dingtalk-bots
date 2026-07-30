@@ -107,6 +107,9 @@ class PackingResult:
     all_rows: list[PackingRow] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     shipment_sns: list[str] = field(default_factory=list)
+    logistics_channel: str = ""
+    store_name: str = ""
+    country: str = ""
 
     @property
     def amazon_rows(self) -> list[PackingRow]:
@@ -160,7 +163,12 @@ def process_shipment_file(
     finally:
         wb.close()
     items = _build_line_items(pack_rows, detail_rows, product_specs or {})
-    return compute_packing(items)
+    result = compute_packing(items)
+    channel, store, country = _first_detail_meta(detail_rows)
+    result.logistics_channel = channel
+    result.store_name = store
+    result.country = country
+    return result
 
 
 def compute_packing(items: Sequence[LineItem]) -> PackingResult:
@@ -534,6 +542,31 @@ def _dims_non_original(volume_cm3: float) -> tuple[float, float, float]:
 
 
 # --- 读表 ---
+
+
+def _first_detail_meta(detail_rows: Sequence[Sequence[Any]]) -> tuple[str, str, str]:
+    """发货单详情：物流渠道 / 店铺 / 国家 各取第一个非空值。"""
+    if not detail_rows:
+        return "", "", ""
+    header = [_cell_str(c) for c in detail_rows[0]]
+    idx = _header_index(header)
+    channel_keys = ("物流渠道",)
+    store_keys = ("店铺", "店铺名称")
+    country_keys = ("国家", "目的国家", "目的国")
+
+    def _pick(keys: tuple[str, ...]) -> str:
+        col = next((k for k in keys if k in idx), None)
+        if col is None:
+            return ""
+        for raw in detail_rows[1:]:
+            if not raw:
+                continue
+            val = _cell_str(_get(raw, idx, col))
+            if val:
+                return val
+        return ""
+
+    return _pick(channel_keys), _pick(store_keys), _pick(country_keys)
 
 
 def _build_line_items(
