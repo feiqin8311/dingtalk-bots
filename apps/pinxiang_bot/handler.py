@@ -29,6 +29,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 import pinxiang_config  # noqa: E402
+from amazon_export import create_amazon_workbook  # noqa: E402
 from amazon_packaging import fill_amazon_packaging_file, is_amazon_packaging_workbook  # noqa: E402
 from packing import process_shipment_file, write_packing_workbook  # noqa: E402
 from product_info_source import load_product_specs  # noqa: E402
@@ -68,6 +69,7 @@ class PendingLogistics:
     logistics_channel: str = ""
     store_name: str = ""
     country: str = ""
+    amazon_template_path: Optional[Path] = None
 
 
 @dataclass
@@ -81,6 +83,7 @@ class PendingOpsJob:
     logistics_channel: str = ""
     store_name: str = ""
     country: str = ""
+    amazon_template_path: Optional[Path] = None
 
 
 class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
@@ -187,6 +190,11 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             None, partial(write_packing_workbook, result, packing_path)
         )
 
+        amazon_template_path = await asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(self._build_amazon_template, job_dir, result, pinxiang_config.AMAZON_TEMPLATE_MPL),
+        )
+
         shipment_copy = job_dir / shipment.file_name
         if shipment.path.resolve() != shipment_copy.resolve():
             shipment_copy.write_bytes(shipment.path.read_bytes())
@@ -204,6 +212,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 logistics_channel=result.logistics_channel or "",
                 store_name=result.store_name or "",
                 country=result.country or "",
+                amazon_template_path=amazon_template_path,
             ),
         )
 
@@ -237,6 +246,10 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         if normalized in {"取消", "cancel", "取消拼箱"}:
             self._drop_user_pending(user_id)
             await self._send_text(user_id, "已取消本次拼箱任务。")
+            return True
+
+        if normalized in {"模板2", "模板 2", "生成模板2", "重新生成模板2", "template2", "template 2"}:
+            await self._handle_template_v2(user_id)
             return True
 
         pending = self._pending_logistics.get(user_id)
@@ -298,10 +311,33 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             return
 
         packing_bytes = packing_path.read_bytes()
+        template_path = pending.amazon_template_path
+        if template_path is None or not Path(template_path).is_file():
+            # 兜底：转发时再生成模板1
+            packing_result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                partial(
+                    process_shipment_file,
+                    pending.shipment_path,
+                    product_specs=self._load_product_specs_safe(),
+                ),
+            )
+            template_path = await asyncio.get_running_loop().run_in_executor(
+                None,
+                partial(
+                    self._build_amazon_template,
+                    pending.merge_dir,
+                    packing_result,
+                    pinxiang_config.AMAZON_TEMPLATE_MPL,
+                ),
+            )
+            pending.amazon_template_path = template_path
+
         await self._send_text(
             ops_id,
             "【不分仓拼箱】物流已审核通过，请处理。\n"
-            "请下载拼箱结果核对后，上传亚马逊模板文件，机器人将自动填写并回传。\n"
+            "请下载拼箱结果与 Amazon 模板；已默认发送模板1，如需新版格式回复【模板2】。\n"
+            "也可上传卖家后台「包装箱包装信息」表，机器人将自动填写并回传。\n"
             f"物流渠道：{pending.logistics_channel or ''}\n"
             f"店铺：{pending.store_name or ''}\n"
             f"国家：{pending.country or ''}",
@@ -312,6 +348,14 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             packing_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        if template_path and Path(template_path).is_file():
+            tpl = Path(template_path)
+            await self._send_file(
+                ops_id,
+                tpl.name,
+                tpl.read_bytes(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
         with self._pending_lock:
             self._pending_ops[ops_id] = PendingOpsJob(
@@ -324,13 +368,14 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 logistics_channel=pending.logistics_channel or "",
                 store_name=pending.store_name or "",
                 country=pending.country or "",
+                amazon_template_path=Path(template_path) if template_path else None,
             )
             self._pending_logistics.pop(logistics_user_id, None)
             self._save_pending_state_unlocked()
 
         await self._send_text(
             logistics_user_id,
-            f"已转发给运营【{ops_name}】。\n等待运营上传亚马逊装箱表并由机器人填写回传。",
+            f"已转发给运营【{ops_name}】。\n已发送拼箱结果与 Amazon 模板1；运营可回复【模板2】换新版。",
         )
         self.logger.info(
             "pinxiang forwarded to ops=%s(%s) from logistics=%s",
@@ -413,6 +458,71 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         with self._pending_lock:
             self._pending_ops.pop(ops_user_id, None)
             self._save_pending_state_unlocked()
+
+    async def _handle_template_v2(self, user_id: str) -> None:
+        """运营或物流：按当前拼箱结果用 MPL2 模板重新生成 Amazon 文件。"""
+        self._cleanup_pending()
+        pending_log = self._pending_logistics.get(user_id)
+        pending_ops = self._pending_ops.get(user_id)
+        if pending_log is not None:
+            shipment_path = pending_log.shipment_path
+            merge_dir = pending_log.merge_dir
+            target = "logistics"
+        elif pending_ops is not None:
+            shipment_path = pending_ops.shipment_path
+            merge_dir = pending_ops.merge_dir
+            target = "ops"
+        else:
+            raise MessageFormatError("当前没有进行中的拼箱任务，无法生成模板2。")
+        if not shipment_path.is_file():
+            raise MessageFormatError("发货单文件丢失，无法生成模板2。")
+
+        await self._send_text(user_id, "正在按当前拼箱结果生成 Amazon 模板2，请稍等…")
+        packing_result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(
+                process_shipment_file,
+                shipment_path,
+                product_specs=self._load_product_specs_safe(),
+            ),
+        )
+        template_path = await asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(
+                self._build_amazon_template,
+                merge_dir,
+                packing_result,
+                pinxiang_config.AMAZON_TEMPLATE_MPL2,
+            ),
+        )
+        if target == "logistics" and pending_log is not None:
+            pending_log.amazon_template_path = template_path
+            pending_log.updated_at = time.time()
+            self._persist_pending_state()
+        elif pending_ops is not None:
+            pending_ops.amazon_template_path = template_path
+            pending_ops.updated_at = time.time()
+            self._persist_pending_state()
+
+        await self._send_file(
+            user_id,
+            template_path.name,
+            template_path.read_bytes(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        await self._send_text(user_id, f"模板2已生成并发送：{template_path.name}")
+
+    def _build_amazon_template(self, job_dir: Path, result, template_source: Path) -> Path:
+        source = Path(template_source)
+        if not source.is_file():
+            raise MessageFormatError(f"Amazon 模板不存在：{source}")
+        out_path = Path(job_dir) / source.name
+        create_amazon_workbook(
+            template_source=source,
+            output_path=out_path,
+            result=result,
+        )
+        return out_path
 
     def _ops_menu_text(self, *, prefix: str = "") -> str:
         lines = [prefix.rstrip(), ""]
@@ -557,6 +667,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                         "logistics_channel": p.logistics_channel,
                         "store_name": p.store_name,
                         "country": p.country,
+                        "amazon_template_path": str(p.amazon_template_path)
+                        if p.amazon_template_path
+                        else "",
                     }
                     for uid, p in self._pending_logistics.items()
                 },
@@ -571,6 +684,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                         "logistics_channel": j.logistics_channel,
                         "store_name": j.store_name,
                         "country": j.country,
+                        "amazon_template_path": str(j.amazon_template_path)
+                        if j.amazon_template_path
+                        else "",
                     }
                     for uid, j in self._pending_ops.items()
                 },
@@ -587,6 +703,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             stage = str(item.get("stage") or "confirm")
             if stage not in {"confirm", "select_ops"}:
                 stage = "confirm"
+            tpl = str(item.get("amazon_template_path") or "").strip()
             return PendingLogistics(
                 packing_result_path=Path(str(item["packing_result_path"])),
                 merge_dir=Path(str(item["merge_dir"])),
@@ -596,6 +713,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 logistics_channel=str(item.get("logistics_channel") or ""),
                 store_name=str(item.get("store_name") or ""),
                 country=str(item.get("country") or ""),
+                amazon_template_path=Path(tpl) if tpl else None,
             )
         except Exception:
             return None
@@ -603,6 +721,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
     @staticmethod
     def _ops_from_dict(item: dict) -> Optional[PendingOpsJob]:
         try:
+            tpl = str(item.get("amazon_template_path") or "").strip()
             return PendingOpsJob(
                 logistics_user_id=str(item.get("logistics_user_id") or ""),
                 logistics_name_hint=str(item.get("logistics_name_hint") or ""),
@@ -613,6 +732,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 logistics_channel=str(item.get("logistics_channel") or ""),
                 store_name=str(item.get("store_name") or ""),
                 country=str(item.get("country") or ""),
+                amazon_template_path=Path(tpl) if tpl else None,
             )
         except Exception:
             return None

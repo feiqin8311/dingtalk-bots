@@ -52,6 +52,27 @@ SMB_CLIENT_NAME = os.getenv("SMB_CLIENT_NAME", "dingtalk-pinxiang-bot").strip()
 
 PENDING_TTL_SEC = int((os.getenv("PINXIANG_PENDING_TTL_SEC") or "600").strip())
 
+# Amazon Manifest 模板（与 dingtalk-lcl-bot/Template_Files 一致）
+_TEMPLATES_DIR = APP_DIR / "templates"
+AMAZON_TEMPLATE_MPL = Path(
+    (
+        os.getenv("PINXIANG_AMAZON_TEMPLATE_MPL")
+        or str(
+            _TEMPLATES_DIR
+            / "ManifestFileUpload_Template_IncludeCasePack_IncludeExpirationDate_IncludeMLC_MPL.xlsx"
+        )
+    ).strip()
+)
+AMAZON_TEMPLATE_MPL2 = Path(
+    (
+        os.getenv("PINXIANG_AMAZON_TEMPLATE_MPL2")
+        or str(
+            _TEMPLATES_DIR
+            / "ManifestFileUpload_Template_IncludeCasePack_IncludeExpirationDate_IncludeMLC_MPL2.xlsx"
+        )
+    ).strip()
+)
+
 # 运营人员（物流确认后选择转发对象）
 # 可用 env 覆盖：PINXIANG_OPS_USERS=袁皓冉:id1,陈潇潇:id2
 # 默认运营；可用 PINXIANG_OPS_USERS 覆盖
