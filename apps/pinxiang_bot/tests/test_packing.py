@@ -202,12 +202,12 @@ class PackingLogicTests(unittest.TestCase):
         )
         self.assertEqual(
             result.result_basename(),
-            "拼箱 SP260722004+SP260722005+SP260722006",
+            "SP260722004 SP260722005 SP260722006 拼箱数据",
         )
 
     def test_result_basename_fallback(self):
         result = compute_packing([])
-        self.assertEqual(result.result_basename(fallback="发货单-xxx"), "拼箱 发货单-xxx")
+        self.assertEqual(result.result_basename(fallback="发货单-xxx"), "发货单-xxx 拼箱数据")
 
     @unittest.skipUnless(SAMPLE_SHIPMENT.is_file(), "sample shipment not on this machine")
     def test_sample_shipment_file(self):

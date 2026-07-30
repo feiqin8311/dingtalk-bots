@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -62,11 +64,19 @@ def _load_router_module():
 class LogisticsRouterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.module = _load_router_module()
+        self._state_dir = Path(tempfile.mkdtemp())
+        self._state_path = self._state_dir / "selected_branch.json"
+        self._path_patch = patch.object(self.module, "_BRANCH_STATE_PATH", self._state_path)
+        self._path_patch.start()
         self.router = self.module.LogisticsRouter(
             logger=logging.getLogger("test"),
             config=SimpleNamespace(robot_code="", workspace="/tmp", pinxiang_workspace="/tmp"),
         )
         self.router.pinxiang_handler.has_pending = MagicMock(return_value=False)
+
+    def tearDown(self) -> None:
+        self._path_patch.stop()
+        shutil.rmtree(self._state_dir, ignore_errors=True)
 
     def test_menu_choice_selects_cp_branch(self):
         self.assertEqual(self.router._route({"text": {"content": "1"}}, user_id="u1"), "select_cp")
@@ -78,11 +88,11 @@ class LogisticsRouterTests(unittest.TestCase):
         self.assertEqual(self.router._route({"text": {"content": "3"}}, user_id="u1"), "select_pinxiang")
 
     def test_selected_branch_routes_plain_text_to_cp(self):
-        self.router._selected_branch_by_user["u1"] = "cp"
+        self.router._set_branch("u1", "cp")
         self.assertEqual(self.router._route({"text": {"content": "SP260204001"}}, user_id="u1"), "cp")
 
     def test_pinxiang_branch_keeps_confirm(self):
-        self.router._selected_branch_by_user["u1"] = "pinxiang"
+        self.router._set_branch("u1", "pinxiang")
         self.assertEqual(self.router._route({"text": {"content": "确认"}}, user_id="u1"), "pinxiang")
         self.assertEqual(
             self.router._route({"downloadCodes": ["x"], "text": {"content": ""}}, user_id="u1"),
@@ -102,10 +112,23 @@ class LogisticsRouterTests(unittest.TestCase):
         self.assertEqual(self.router._route({"text": {"content": "帮我拆分PDF"}}, user_id="u1"), "help")
 
     def test_reset_command_resets_current_user(self):
-        self.router._selected_branch_by_user["u1"] = "split"
+        self.router._set_branch("u1", "split")
         self.assertEqual(self.router._route({"text": {"content": "重置"}}, user_id="u1"), "reset")
         self.router._reset_user("u1")
         self.assertNotIn("u1", self.router._selected_branch_by_user)
+
+    def test_branch_selection_persists_across_restart(self):
+        self.router._set_branch("u1", "pinxiang")
+        self.assertTrue(self._state_path.is_file())
+        reloaded = self.module.LogisticsRouter(
+            logger=logging.getLogger("test"),
+            config=SimpleNamespace(robot_code="", workspace="/tmp", pinxiang_workspace="/tmp"),
+        )
+        reloaded.pinxiang_handler.has_pending = MagicMock(return_value=False)
+        self.assertEqual(
+            reloaded._route({"downloadCodes": ["x"], "text": {"content": ""}}, user_id="u1"),
+            "pinxiang",
+        )
 
 
 if __name__ == "__main__":

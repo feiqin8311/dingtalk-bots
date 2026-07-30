@@ -113,11 +113,11 @@ class PackingResult:
         return list(self.all_rows or self.rows)
 
     def result_basename(self, fallback: str = "未知") -> str:
-        """拼箱结果文件名（无扩展名），如：拼箱 SP1+SP2。"""
+        """拼箱结果文件名（无扩展名），如：SP1 SP2 SP3 拼箱数据。"""
         sns = [s.strip() for s in self.shipment_sns if s and str(s).strip()]
         if sns:
-            return f"拼箱 {'+'.join(sns)}"
-        return f"拼箱 {fallback}"
+            return f"{' '.join(sns)} 拼箱数据"
+        return f"{fallback} 拼箱数据"
 
 
 @dataclass

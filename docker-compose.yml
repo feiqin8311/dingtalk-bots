@@ -29,6 +29,7 @@ services:
       - ./apps/split_bot/.bot-workspace:/app/apps/split_bot/.bot-workspace
       - ./apps/pinxiang_bot/.bot-workspace:/app/apps/pinxiang_bot/.bot-workspace
       - ./apps/pinxiang_bot/templates:/app/apps/pinxiang_bot/templates:ro
+      - ./apps/logistics_bot/.state:/app/apps/logistics_bot/.state
     command: ["python", "apps/logistics_bot/main.py"]
 
   dingtalk-cp-bot:

@@ -4,6 +4,7 @@ import logging
 import re
 import sys
 import json
+import threading
 import urllib.request
 import uuid
 from pathlib import Path
@@ -13,6 +14,10 @@ import dingtalk_stream
 from dingtalk_stream import AckMessage
 
 from settings import ROOT_DIR, LogisticsBotConfig
+
+# branch selection must survive process restart (was pure memory → menu after upload)
+_BRANCH_STATE_PATH = ROOT_DIR / "apps" / "logistics_bot" / ".state" / "selected_branch.json"
+_VALID_BRANCHES = frozenset({"cp", "split", "pinxiang"})
 
 
 CP_APP_DIR = ROOT_DIR / "apps" / "cp_bot"
@@ -108,7 +113,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self.cp_handler = ShipmentQueryHandler(logger=logger)
         self.split_handler = PdfSplitBotHandler(logger=logger, config=config)
         self.pinxiang_handler = PinxiangBotHandler(logger=logger, config=config)
-        self._selected_branch_by_user: dict[str, RouteName] = {}
+        self._branch_lock = threading.Lock()
+        self._selected_branch_by_user: dict[str, RouteName] = self._load_branch_state()
         self._call_log = self._build_call_log_store()
 
     async def process(self, callback: dingtalk_stream.CallbackMessage) -> Tuple[str, str]:
@@ -127,18 +133,15 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             await self._send_text(callback.data, RESET_TEXT)
             return AckMessage.STATUS_OK, "RESET"
         if route == "select_cp":
-            if user_id:
-                self._selected_branch_by_user[user_id] = "cp"
+            self._set_branch(user_id, "cp")
             await self._send_text(callback.data, CP_SELECTED_TEXT)
             return AckMessage.STATUS_OK, "SELECT_CP"
         if route == "select_split":
-            if user_id:
-                self._selected_branch_by_user[user_id] = "split"
+            self._set_branch(user_id, "split")
             await self._send_text(callback.data, SPLIT_SELECTED_TEXT)
             return AckMessage.STATUS_OK, "SELECT_SPLIT"
         if route == "select_pinxiang":
-            if user_id:
-                self._selected_branch_by_user[user_id] = "pinxiang"
+            self._set_branch(user_id, "pinxiang")
             await self._send_text(callback.data, PINXIANG_SELECTED_TEXT)
             return AckMessage.STATUS_OK, "SELECT_PINXIANG"
         if route == "cp":
@@ -149,6 +152,43 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             return await self.pinxiang_handler.process(callback)
         await self._send_text(callback.data, HELP_TEXT)
         return AckMessage.STATUS_OK, "HELP"
+
+    def _set_branch(self, user_id: str, branch: RouteName) -> None:
+        if not user_id or branch not in _VALID_BRANCHES:
+            return
+        with self._branch_lock:
+            self._selected_branch_by_user[user_id] = branch
+            self._save_branch_state_unlocked()
+
+    def _load_branch_state(self) -> dict[str, RouteName]:
+        path = _BRANCH_STATE_PATH
+        try:
+            if not path.is_file():
+                return {}
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, RouteName] = {}
+            for uid, branch in raw.items():
+                if uid and branch in _VALID_BRANCHES:
+                    out[str(uid)] = branch  # type: ignore[assignment]
+            return out
+        except Exception as exc:
+            self.logger.warning("load branch state failed: %s", exc)
+            return {}
+
+    def _save_branch_state_unlocked(self) -> None:
+        path = _BRANCH_STATE_PATH
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(self._selected_branch_by_user, ensure_ascii=False, indent=0),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except Exception as exc:
+            self.logger.warning("save branch state failed: %s", exc)
 
     def _build_call_log_store(self) -> ProjectCallLogStore | None:
         missing = [
@@ -313,7 +353,9 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
     def _reset_user(self, user_id: str) -> None:
         if not user_id:
             return
-        self._selected_branch_by_user.pop(user_id, None)
+        with self._branch_lock:
+            self._selected_branch_by_user.pop(user_id, None)
+            self._save_branch_state_unlocked()
         self.split_handler._pending_uploads.pop(user_id, None)
         self.split_handler._pending_confirmations.pop(user_id, None)
         clear = getattr(self.pinxiang_handler, "clear_user", None)

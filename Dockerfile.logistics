@@ -31,6 +31,7 @@ RUN mkdir -p \
     /app/files \
     /app/apps/cp_bot/downloads \
     /app/apps/split_bot/.bot-workspace \
-    /app/apps/pinxiang_bot/.bot-workspace
+    /app/apps/pinxiang_bot/.bot-workspace \
+    /app/apps/logistics_bot/.state
 
 CMD ["python", "apps/logistics_bot/main.py"]

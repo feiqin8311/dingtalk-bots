@@ -4,6 +4,8 @@ __pycache__/
 .bot-workspace/
 downloads/
 .DS_Store
+apps/track_notify/.state/
+apps/logistics_bot/.state/
 
 # Sync Excel data (local/ops only); keep docs
 files/*
