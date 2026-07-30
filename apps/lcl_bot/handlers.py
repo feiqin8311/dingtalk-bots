@@ -200,6 +200,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self._handle_reset_command(incoming_message, user_role)
         elif text_content in ['确认', 'confirm', '确定']:
             await self._handle_confirmation(incoming_message, user_role)
+        elif user_role == 'logistics' and self.state_manager.is_waiting_for_ops_select():
+            await self._handle_ops_selection(incoming_message, text_content)
         elif text_content in ['删除', '删除发货单', '是', 'yes', 'YES']:
             await self._handle_delete_decision(incoming_message, user_role, delete=True)
         elif text_content in ['不删除', '否', 'no', 'NO', '保留']:
@@ -445,7 +447,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 )
             self._send_text_reply(
                 f"📋 处理结果已发送给您，请查收并确认。{registry_info}\n"
-                "回复【确认】➡️ 将结果转发给运营\n"
+                "回复【确认】➡️ 选择运营并转发\n"
                 "上传修正版拼箱结果Excel ➡️ 替换当前结果并重新生成Amazon模板\n"
                 "回复【重置】➡️ 放弃本次结果并重新上传发货单",
                 incoming_message
@@ -726,118 +728,154 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             )
     
     async def _handle_confirmation(self, incoming_message, user_role: str):
-        """处理物流人员的确认"""
+        """处理物流人员的确认 → 进入选运营"""
         try:
-            # 只有物流人员可以确认
-            if user_role != 'logistics':
-                self._send_text_reply(
-                    "⚠️  只有物流人员可以执行确认操作",
-                    incoming_message
-                )
+            if user_role != "logistics":
+                self._send_text_reply("⚠️  只有物流人员可以执行确认操作", incoming_message)
                 return
-            
-            # 检查状态
-            if not self.state_manager.is_waiting_for_confirmation():
-                self._send_text_reply(
-                    "⚠️  当前没有需要确认的内容",
-                    incoming_message
-                )
-                return
-            
-            # 获取拼箱结果文件
-            packing_result_path = self.state_manager.get_packing_result_path()
-            
-            # 获取共享盘文件夹路径
-            shared_folder_path = self.state_manager.state.get('shared_folder_path')
-            
-            # 复制拼箱结果到共享盘
-            if shared_folder_path and os.path.exists(packing_result_path):
-                try:
-                    shared_result_path = os.path.join(shared_folder_path, os.path.basename(packing_result_path))
-                    shutil.copy2(packing_result_path, shared_result_path)
-                    self.logger.info(f"✅ 拼箱结果已复制到共享盘: {shared_result_path}")
-                except Exception as copy_exc:
-                    self.logger.warning(f"复制拼箱结果到共享盘失败: {copy_exc}")
-            
-            # 上传文件（OpenAPI，用于机器人主动推送）
-            media_id, file_name = self._upload_stream_file(packing_result_path, incoming_message)
-            
-            # 获取并上传Amazon发货模板
-            amazon_template_path = self.state_manager.get_amazon_template_path()
-            template_media_id = None
-            template_file_name = None
-            if amazon_template_path and os.path.exists(amazon_template_path):
-                template_media_id, template_file_name = self._upload_stream_file(amazon_template_path, incoming_message)
-                
-                # 也复制Amazon模板到共享盘
-                if shared_folder_path:
-                    try:
-                        shared_template_path = os.path.join(shared_folder_path, os.path.basename(amazon_template_path))
-                        shutil.copy2(amazon_template_path, shared_template_path)
-                        self.logger.info(f"✅ Amazon模板已复制到共享盘: {shared_template_path}")
-                    except Exception as copy_exc:
-                        self.logger.warning(f"复制Amazon模板到共享盘失败: {copy_exc}")
-            else:
-                self.logger.warning("未找到Amazon发货模板文件，无法一并推送给运营人员")
-            
-            # 通知所有运营人员（注意：Stream模式下无法主动发送文件给其他用户）
-            success_count = 0
-            for operation_user_id in config.OPERATION_USERS:
-                corp_user_id = self._normalize_recipient_id(operation_user_id)
-                if not corp_user_id:
-                    self.logger.warning(f"无法获取运营人员 {operation_user_id} 的userid，已跳过")
-                    continue
-                try:
-                    # 主动发送文件消息
-                    self.dingtalk_api.send_file_message(
-                        corp_user_id,
-                        media_id,
-                        file_name
-                    )
-                    if template_media_id and template_file_name:
-                        self.dingtalk_api.send_file_message(
-                            corp_user_id,
-                            template_media_id,
-                            template_file_name
-                        )
 
-                    instruction_text = (
-                        "📦 物流已确认新的拼箱结果，请您尽快处理。\n"
-                        "已默认发送Amazon模板1；如需新版格式，请回复【模板2】重新生成。"
-                    )
-                    self.dingtalk_api.send_text_message(corp_user_id, instruction_text)
-                    
-                    success_count += 1
-                    self.logger.info(f"已发送拼箱结果给运营人员: {operation_user_id}")
-                except Exception as e:
-                    self.logger.error(f"发送给运营人员 {operation_user_id} 失败: {e}")
-            
-            # 抄送拼箱结果和Amazon模板给OTHER_USERS
-            self._send_excel_copy_to_others(media_id, file_name, "拼箱结果（物流已确认）")
-            if template_media_id and template_file_name:
-                self._send_excel_copy_to_others(template_media_id, template_file_name, "Amazon发货模板")
-            
-            if success_count > 0:
-                # 更新状态
-                self.state_manager.set_logistics_confirmed(config.OPERATION_USERS)
-                
-                # 通知物流人员
+            if not self.state_manager.is_waiting_for_confirmation():
+                self._send_text_reply("⚠️  当前没有需要确认的内容", incoming_message)
+                return
+
+            ops_list = list(getattr(config, "OPS_USERS", None) or [])
+            if not ops_list and config.OPERATION_USERS:
+                ops_list = [{"name": uid, "user_id": uid} for uid in config.OPERATION_USERS]
+            if not ops_list:
                 self._send_text_reply(
-                    "✅ 已成功转发给运营人员",
-                    incoming_message
+                    "⚠️ 未配置运营人员。请在 .env 设置 LCL_OPERATION_USERS 或 OPERATION_USERS / PINXIANG_OPS_USERS（格式：姓名:userId,...）",
+                    incoming_message,
                 )
-                
-                self.logger.info("确认流程完成，等待运营上传")
-            else:
-                self._send_text_reply(
-                    "❌ 转发失败，请稍后重试或联系技术支持",
-                    incoming_message
-                )
-            
+                return
+
+            packing_result_path = self.state_manager.get_packing_result_path()
+            if not packing_result_path or not os.path.exists(packing_result_path):
+                self._send_text_reply("⚠️ 拼箱结果文件丢失，请重新上传发货单。", incoming_message)
+                return
+
+            self.state_manager.set_waiting_for_ops_select()
+            self._send_text_reply(self._ops_menu_text(prefix="已确认拼箱结果。\n请选择要转发的运营：\n"), incoming_message)
+            self.logger.info("lcl waiting for ops selection")
         except Exception as e:
             self.logger.error(f"处理确认时发生错误: {e}", exc_info=True)
             self._send_text_reply(f"❌ 确认失败: {str(e)}", incoming_message)
             self._notify_tech_support(f"处理物流确认失败：{str(e)}")
+
+    def _ops_menu_text(self, *, prefix: str = "") -> str:
+        ops_list = list(getattr(config, "OPS_USERS", None) or [])
+        if not ops_list and config.OPERATION_USERS:
+            ops_list = [{"name": uid, "user_id": uid} for uid in config.OPERATION_USERS]
+        lines = [prefix.rstrip(), ""]
+        for i, ops in enumerate(ops_list, start=1):
+            lines.append(f"{i}. {ops.get('name') or ops.get('user_id')}")
+        lines.append("")
+        lines.append("回复序号或姓名选择；回复【重置】放弃。")
+        return "\n".join(lines).strip()
+
+    def _match_ops_choice(self, text: str) -> Optional[dict]:
+        ops_list = list(getattr(config, "OPS_USERS", None) or [])
+        if not ops_list and config.OPERATION_USERS:
+            ops_list = [{"name": uid, "user_id": uid} for uid in config.OPERATION_USERS]
+        normalized = re.sub(r"\s+", "", (text or "").strip()).lower()
+        if not normalized:
+            return None
+        for i, ops in enumerate(ops_list, start=1):
+            name = re.sub(r"\s+", "", str(ops.get("name") or "")).lower()
+            uid = str(ops.get("user_id") or "")
+            if normalized == str(i) or normalized.startswith(f"{i}.") or normalized.startswith(f"{i}、"):
+                return ops
+            if name and (normalized == name or name in normalized or normalized in name):
+                return ops
+            if uid and normalized == uid.lower():
+                return ops
+        return None
+
+    async def _handle_ops_selection(self, incoming_message, text_content: str) -> None:
+        """物流选择运营后，只转发给该运营。"""
+        try:
+            ops = self._match_ops_choice(text_content)
+            if ops is None:
+                self._send_text_reply(self._ops_menu_text(prefix="请选择运营人员：\n"), incoming_message)
+                return
+            await self._forward_to_selected_ops(incoming_message, ops)
+        except Exception as e:
+            self.logger.error(f"选择运营失败: {e}", exc_info=True)
+            self._send_text_reply(f"❌ 转发失败: {str(e)}", incoming_message)
+            self._notify_tech_support(f"lcl 选择运营转发失败：{str(e)}")
+
+    async def _forward_to_selected_ops(self, incoming_message, ops: dict) -> None:
+        """将拼箱结果 + Amazon 模板发给指定运营。"""
+        if not self.state_manager.is_waiting_for_ops_select():
+            self._send_text_reply("⚠️ 当前不在选运营阶段。", incoming_message)
+            return
+
+        packing_result_path = self.state_manager.get_packing_result_path()
+        if not packing_result_path or not os.path.exists(packing_result_path):
+            self._send_text_reply("⚠️ 拼箱结果文件丢失，请重新上传发货单。", incoming_message)
+            return
+
+        shared_folder_path = self.state_manager.state.get("shared_folder_path")
+        if shared_folder_path and os.path.exists(packing_result_path):
+            try:
+                shared_result_path = os.path.join(shared_folder_path, os.path.basename(packing_result_path))
+                shutil.copy2(packing_result_path, shared_result_path)
+            except Exception as copy_exc:
+                self.logger.warning(f"复制拼箱结果到共享盘失败: {copy_exc}")
+
+        media_id, file_name = self._upload_stream_file(packing_result_path, incoming_message)
+
+        amazon_template_path = self.state_manager.get_amazon_template_path()
+        template_media_id = None
+        template_file_name = None
+        if amazon_template_path and os.path.exists(amazon_template_path):
+            template_media_id, template_file_name = self._upload_stream_file(
+                amazon_template_path, incoming_message
+            )
+            if shared_folder_path:
+                try:
+                    shared_template_path = os.path.join(
+                        shared_folder_path, os.path.basename(amazon_template_path)
+                    )
+                    shutil.copy2(amazon_template_path, shared_template_path)
+                except Exception as copy_exc:
+                    self.logger.warning(f"复制Amazon模板到共享盘失败: {copy_exc}")
+        else:
+            self.logger.warning("未找到Amazon发货模板文件，仅发送拼箱结果")
+
+        ops_id = ops.get("user_id") or ""
+        ops_name = ops.get("name") or ops_id
+        corp_user_id = self._normalize_recipient_id(ops_id) or ops_id
+        if not corp_user_id:
+            self._send_text_reply(f"❌ 无法解析运营【{ops_name}】的 userId", incoming_message)
+            return
+
+        try:
+            self.dingtalk_api.send_file_message(corp_user_id, media_id, file_name)
+            if template_media_id and template_file_name:
+                self.dingtalk_api.send_file_message(
+                    corp_user_id, template_media_id, template_file_name
+                )
+            instruction_text = (
+                "【分仓拼箱】物流已审核通过，请处理。\n"
+                "请下载拼箱结果与 Amazon 模板；已默认发送模板1，如需新版格式回复【模板2】。\n"
+                "也可上传卖家后台包装信息表，机器人将自动填写并回传。"
+            )
+            self.dingtalk_api.send_text_message(corp_user_id, instruction_text)
+        except Exception as e:
+            self.logger.error(f"发送给运营 {ops_name}({ops_id}) 失败: {e}")
+            self._send_text_reply(f"❌ 转发给运营【{ops_name}】失败: {e}", incoming_message)
+            return
+
+        self._send_excel_copy_to_others(media_id, file_name, "拼箱结果（物流已确认）")
+        if template_media_id and template_file_name:
+            self._send_excel_copy_to_others(template_media_id, template_file_name, "Amazon发货模板")
+
+        self.state_manager.set_logistics_confirmed([ops_id])
+        self._send_text_reply(
+            f"✅ 已转发给运营【{ops_name}】。\n已发送拼箱结果与 Amazon 模板1。",
+            incoming_message,
+        )
+        self.logger.info("lcl forwarded to ops=%s(%s)", ops_name, ops_id)
 
     async def _handle_delete_decision(self, incoming_message, user_role: str, delete: bool):
         """处理运营确认是否删除发货单"""
@@ -1700,10 +1738,14 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             ),
             WorkflowState.LOGISTICS_UPLOADED: (
                 "🟡 已生成拼箱结果，等待物流确认",
-                "物流可回复\"确认\"转交运营，或回复\"重置\"重新上传"
+                "物流可回复\"确认\"后选择运营，或回复\"重置\"重新上传"
+            ),
+            WorkflowState.WAIT_OPS_SELECT: (
+                "🟡 物流已确认，等待选择运营",
+                "物流回复序号或姓名选择要转发的运营"
             ),
             WorkflowState.LOGISTICS_CONFIRMED: (
-                "🟡 物流已确认，正等待运营上传Amazon包装信息",
+                "🟡 已转发给运营，正等待运营上传Amazon包装信息",
                 "运营上传Amazon文件后系统会自动处理"
             ),
             WorkflowState.OPERATION_UPLOADED: (

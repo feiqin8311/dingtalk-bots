@@ -56,8 +56,34 @@ ROBOT_CODE = (
 _logistics_users_str = os.getenv("LCL_LOGISTICS_USERS") or os.getenv("LOGISTICS_USERS") or ""
 LOGISTICS_USERS = [uid.strip() for uid in _logistics_users_str.split(",") if uid.strip()]
 
-_operation_users_str = os.getenv("LCL_OPERATION_USERS") or os.getenv("OPERATION_USERS") or ""
-OPERATION_USERS = [uid.strip() for uid in _operation_users_str.split(",") if uid.strip()]
+# 运营：支持 name:userId 或纯 userId；也可用 PINXIANG_OPS_USERS 复用不分仓名单
+_operation_users_str = (
+    os.getenv("LCL_OPERATION_USERS")
+    or os.getenv("OPERATION_USERS")
+    or os.getenv("PINXIANG_OPS_USERS")
+    or ""
+).strip()
+
+
+def _parse_ops_users(raw: str) -> list[dict[str, str]]:
+    users: list[dict[str, str]] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            name, uid = part.split(":", 1)
+            name, uid = name.strip(), uid.strip()
+        else:
+            name, uid = part, part
+        if uid:
+            users.append({"name": name or uid, "user_id": uid})
+    return users
+
+
+OPS_USERS = _parse_ops_users(_operation_users_str)
+# 兼容旧代码：纯 userId 列表
+OPERATION_USERS = [u["user_id"] for u in OPS_USERS]
 
 _technology_users_str = (
     os.getenv("LCL_TECHNOLOGY_USERS")

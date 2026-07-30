@@ -16,7 +16,8 @@ class WorkflowState:
     """工作流状态枚举"""
     IDLE = 'IDLE'  # 空闲状态
     LOGISTICS_UPLOADED = 'LOGISTICS_UPLOADED'  # 物流已上传，待确认
-    LOGISTICS_CONFIRMED = 'LOGISTICS_CONFIRMED'  # 物流已确认，待运营
+    WAIT_OPS_SELECT = 'WAIT_OPS_SELECT'  # 物流已确认，待选择运营
+    LOGISTICS_CONFIRMED = 'LOGISTICS_CONFIRMED'  # 已转发运营，待运营上传
     OPERATION_UPLOADED = 'OPERATION_UPLOADED'  # 运营已上传，处理中
     WAIT_DELETE_CONFIRMATION = 'WAIT_DELETE_CONFIRMATION'  # 等待运营确认是否删除发货单
     WAIT_SHIPMENT_NUMBERS = 'WAIT_SHIPMENT_NUMBERS'  # 等待运营输入领星发货单号
@@ -93,10 +94,21 @@ class StateManager:
     def is_waiting_for_confirmation(self) -> bool:
         """检查是否正在等待物流确认"""
         return self.get_status() == WorkflowState.LOGISTICS_UPLOADED
+
+    def is_waiting_for_ops_select(self) -> bool:
+        """物流已确认，等待选择要转发的运营"""
+        return self.get_status() == WorkflowState.WAIT_OPS_SELECT
     
     def is_waiting_for_operation(self) -> bool:
         """检查是否正在等待运营上传"""
         return self.get_status() == WorkflowState.LOGISTICS_CONFIRMED
+
+    def set_waiting_for_ops_select(self) -> None:
+        if not self.is_waiting_for_confirmation():
+            raise ValueError(f"当前状态为 {self.get_status()}，无法进入选运营")
+        self.state["status"] = WorkflowState.WAIT_OPS_SELECT
+        self._save_state()
+        print(f"✅ 状态已更新: {WorkflowState.WAIT_OPS_SELECT}")
 
     def is_waiting_for_delete_confirmation(self) -> bool:
         """检查是否等待运营确认删除发货单"""
@@ -142,12 +154,14 @@ class StateManager:
         print(f"✅ 状态已更新: {WorkflowState.LOGISTICS_UPLOADED}")
     
     def set_logistics_confirmed(self, operation_user_ids: list):
-        """设置物流已确认状态"""
-        if not self.is_waiting_for_confirmation():
-            raise ValueError(f"当前状态为 {self.get_status()}，无法执行确认操作")
-        
-        self.state['status'] = WorkflowState.LOGISTICS_CONFIRMED
-        self.state['operation_user_ids'] = operation_user_ids  # 存储运营人员列表
+        """设置已转发运营（从选运营或旧确认路径进入）"""
+        if not (self.is_waiting_for_confirmation() or self.is_waiting_for_ops_select()):
+            raise ValueError(f"当前状态为 {self.get_status()}，无法执行确认/转发操作")
+
+        self.state["status"] = WorkflowState.LOGISTICS_CONFIRMED
+        self.state["operation_user_ids"] = operation_user_ids
+        if operation_user_ids:
+            self.state["operation_user_id"] = operation_user_ids[0]
         self._save_state()
         print(f"✅ 状态已更新: {WorkflowState.LOGISTICS_CONFIRMED}")
     
@@ -338,6 +352,7 @@ class StateManager:
         valid_statuses = [
             WorkflowState.IDLE,
             WorkflowState.LOGISTICS_UPLOADED,
+            WorkflowState.WAIT_OPS_SELECT,
             WorkflowState.LOGISTICS_CONFIRMED,
             WorkflowState.OPERATION_UPLOADED,
             WorkflowState.WAIT_DELETE_CONFIRMATION,
