@@ -94,7 +94,7 @@ class PackingRow:
             "发货数量": _num(self.qty),
             "单箱数量": _num(self.units_per_box),
             "箱数": _num(self.box_count),
-            "单箱毛重": _round1(self.box_weight_kg),
+            "单箱毛重": _round2(self.box_weight_kg),
             "长": _round1(self.length_cm),
             "宽": _round1(self.width_cm),
             "高": _round1(self.height_cm),
@@ -680,6 +680,10 @@ def _clamp_side(value: float) -> float:
 
 def _round1(value: float) -> float:
     return round(float(value), 1)
+
+
+def _round2(value: float) -> float:
+    return round(float(value), 2)
 
 
 def _num(value: float) -> float | int:
