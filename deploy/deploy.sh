@@ -61,6 +61,8 @@ rsync -az --delete \
   --exclude '**/downloads/' \
   --exclude '**/.bot-workspace/' \
   --exclude 'apps/logistics_bot/.state/' \
+  --exclude 'apps/lcl_bot/Excel_Files/' \
+  --exclude 'apps/lcl_bot/Workflow_State/' \
   --exclude 'apps/track_notify/.state/' \
   --exclude 'apps/pinxiang_bot/output/' \
   --exclude 'files/*.xlsx' \
@@ -75,6 +77,8 @@ remote "mkdir -p \
   '${DEPLOY_PATH}/apps/cp_bot/downloads' \
   '${DEPLOY_PATH}/apps/split_bot/.bot-workspace' \
   '${DEPLOY_PATH}/apps/pinxiang_bot/.bot-workspace' \
+  '${DEPLOY_PATH}/apps/lcl_bot/Excel_Files' \
+  '${DEPLOY_PATH}/apps/lcl_bot/Workflow_State' \
   '${DEPLOY_PATH}/files'"
 
 if [[ "$REBUILD" -eq 1 ]]; then

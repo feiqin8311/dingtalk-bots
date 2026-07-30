@@ -17,12 +17,13 @@ from settings import ROOT_DIR, LogisticsBotConfig
 
 # branch selection must survive process restart (was pure memory → menu after upload)
 _BRANCH_STATE_PATH = ROOT_DIR / "apps" / "logistics_bot" / ".state" / "selected_branch.json"
-_VALID_BRANCHES = frozenset({"cp", "split", "pinxiang"})
+_VALID_BRANCHES = frozenset({"cp", "split", "pinxiang", "lcl"})
 
 
 CP_APP_DIR = ROOT_DIR / "apps" / "cp_bot"
 SPLIT_APP_DIR = ROOT_DIR / "apps" / "split_bot"
 PINXIANG_APP_DIR = ROOT_DIR / "apps" / "pinxiang_bot"
+LCL_APP_DIR = ROOT_DIR / "apps" / "lcl_bot"
 # insert order: last wins for top-level `handler` → cp_bot must be last
 for path in (str(SPLIT_APP_DIR), str(CP_APP_DIR)):
     if path not in sys.path:
@@ -34,7 +35,7 @@ from Bot.runtime import collect_download_codes  # type: ignore  # noqa: E402
 from Utils.dingtalk_api import get_token, send_robot_private_text_message  # type: ignore  # noqa: E402
 from shared.call_log import ProjectCallLogStore  # noqa: E402
 
-# pinxiang is isolated: load by absolute path so it never shadows cp_bot.handler
+# pinxiang / lcl isolated: absolute path load so they never shadow cp_bot.handler
 import importlib.util
 
 _pinxiang_spec = importlib.util.spec_from_file_location(
@@ -47,16 +48,22 @@ sys.modules["pinxiang_bot_handler"] = _pinxiang_module
 _pinxiang_spec.loader.exec_module(_pinxiang_module)
 PinxiangBotHandler = _pinxiang_module.PinxiangBotHandler
 
+if str(LCL_APP_DIR) not in sys.path:
+    sys.path.insert(0, str(LCL_APP_DIR.parent))  # apps/ so `import lcl_bot` works
+from lcl_bot.handlers import WorkflowBotHandler as LclBotHandler  # type: ignore  # noqa: E402
+
 
 RouteName = Literal[
     "cp",
     "split",
     "pinxiang",
+    "lcl",
     "help",
     "reset",
     "select_cp",
     "select_split",
     "select_pinxiang",
+    "select_lcl",
 ]
 
 HELP_TEXT = """物流部机器人
@@ -65,8 +72,9 @@ HELP_TEXT = """物流部机器人
 1. 发货单核对
 2. 标签/PDF 拆分
 3. 不分仓拼箱
+4. 分仓拼箱
 
-回复【1】【2】或【3】进入对应业务
+回复【1】【2】【3】或【4】进入对应业务
 回复【重置】➡️ 放弃本次并重新选择业务
 """
 
@@ -89,7 +97,16 @@ SPLIT_SELECTED_TEXT = """已进入：2. 标签/PDF 拆分
 PINXIANG_SELECTED_TEXT = """已进入：3. 不分仓拼箱
 
 物流：上传发货单 Excel → 审核拼箱结果 → 确认并选择运营转发。
-运营：收到拼箱结果后，上传亚马逊「包装箱包装信息」表，机器人填写后回传。
+运营：收到拼箱结果与 Amazon 模板后处理。
+
+回复【重置】➡️ 放弃本次并重新选择业务
+"""
+
+LCL_SELECTED_TEXT = """已进入：4. 分仓拼箱
+
+物流：上传含「发货单详情」的 Excel → 审核拼箱结果 → 确认转发给运营。
+运营：下载拼箱结果与 Amazon 模板；可回【模板2】；上传包装信息表后机器人回填。
+后续可按提示处理领星删单等步骤。
 
 回复【重置】➡️ 放弃本次并重新选择业务
 """
@@ -100,6 +117,7 @@ RESET_TEXT = """已重置当前选择。
 1. 发货单核对
 2. 标签/PDF 拆分
 3. 不分仓拼箱
+4. 分仓拼箱
 
 回复【重置】➡️ 放弃本次并重新选择业务
 """
@@ -113,6 +131,7 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self.cp_handler = ShipmentQueryHandler(logger=logger)
         self.split_handler = PdfSplitBotHandler(logger=logger, config=config)
         self.pinxiang_handler = PinxiangBotHandler(logger=logger, config=config)
+        self.lcl_handler = LclBotHandler(logger=logger, config_obj=config)
         self._branch_lock = threading.Lock()
         self._selected_branch_by_user: dict[str, RouteName] = self._load_branch_state()
         self._call_log = self._build_call_log_store()
@@ -124,6 +143,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             self.cp_handler.dingtalk_client = self.dingtalk_client
         if getattr(self.pinxiang_handler, "dingtalk_client", None) is None:
             self.pinxiang_handler.dingtalk_client = self.dingtalk_client
+        if getattr(self.lcl_handler, "dingtalk_client", None) is None:
+            self.lcl_handler.dingtalk_client = self.dingtalk_client
         user_id = self._extract_user_id(callback.data)
         route = self._route(callback.data, user_id=user_id)
         self.logger.info("logistics router selected route=%s", route)
@@ -144,12 +165,18 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             self._set_branch(user_id, "pinxiang")
             await self._send_text(callback.data, PINXIANG_SELECTED_TEXT)
             return AckMessage.STATUS_OK, "SELECT_PINXIANG"
+        if route == "select_lcl":
+            self._set_branch(user_id, "lcl")
+            await self._send_text(callback.data, LCL_SELECTED_TEXT)
+            return AckMessage.STATUS_OK, "SELECT_LCL"
         if route == "cp":
             return await self.cp_handler.process(callback)
         if route == "split":
             return await self.split_handler.process(callback)
         if route == "pinxiang":
             return await self.pinxiang_handler.process(callback)
+        if route == "lcl":
+            return await self.lcl_handler.process(callback)
         await self._send_text(callback.data, HELP_TEXT)
         return AckMessage.STATUS_OK, "HELP"
 
@@ -216,11 +243,11 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
     def _log_route_event(self, payload: dict, *, route: RouteName, user_id: str) -> None:
         if self._call_log is None:
             return
-        if route in {"reset", "select_cp", "select_split", "select_pinxiang", "help"}:
+        if route in {"reset", "select_cp", "select_split", "select_pinxiang", "select_lcl", "help"}:
             return
         text = self._extract_text(payload)
         normalized = self._normalize_command(text)
-        if route in {"split", "pinxiang"} and normalized in {
+        if route in {"split", "pinxiang", "lcl"} and normalized in {
             "确认",
             "确认拆分",
             "确认拼箱",
@@ -229,6 +256,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             "取消拆分",
             "取消拼箱",
             "cancel",
+            "模板2",
+            "template2",
         }:
             return
         try:
@@ -249,19 +278,23 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         normalized = self._normalize_command(text)
         if normalized in {"重置", "重新开始", "reset"}:
             return "reset"
-        # 拼箱进行中（选运营 1/2、确认、运营上传）优先于全局菜单 1/2/3，
+        # 拼箱进行中（选运营 1/2、确认、运营上传）优先于全局菜单，
         # 否则回复「1. 柯鹏翔」会被误判为「1. 发货单核对」
         if user_id and getattr(self.pinxiang_handler, "has_pending", lambda _u: False)(user_id):
             return "pinxiang"
         selected = self._selected_branch_by_user.get(user_id or "")
         if selected == "pinxiang":
             return "pinxiang"
+        if selected == "lcl":
+            return "lcl"
         if self._is_menu_choice(normalized, "1"):
             return "select_cp"
         if self._is_menu_choice(normalized, "2"):
             return "select_split"
         if self._is_menu_choice(normalized, "3"):
             return "select_pinxiang"
+        if self._is_menu_choice(normalized, "4"):
+            return "select_lcl"
         if selected in {"cp", "split"}:
             if collect_download_codes(payload):
                 return "split"
@@ -353,6 +386,7 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
     def _reset_user(self, user_id: str) -> None:
         if not user_id:
             return
+        prev = self._selected_branch_by_user.get(user_id)
         with self._branch_lock:
             self._selected_branch_by_user.pop(user_id, None)
             self._save_branch_state_unlocked()
@@ -361,6 +395,14 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         clear = getattr(self.pinxiang_handler, "clear_user", None)
         if callable(clear):
             clear(user_id)
+        # lcl 全局单工作流：从分仓分支重置时清状态
+        if prev == "lcl":
+            try:
+                sm = getattr(self.lcl_handler, "state_manager", None)
+                if sm is not None and hasattr(sm, "reset"):
+                    sm.reset()
+            except Exception as exc:
+                self.logger.warning("lcl state reset failed: %s", exc)
 
     @staticmethod
     def _extract_user_id(payload: dict) -> str:

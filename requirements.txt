@@ -11,4 +11,5 @@ pypdf
 alibabacloud-dingtalk
 websockets
 requests
+pandas>=1.5.0
 

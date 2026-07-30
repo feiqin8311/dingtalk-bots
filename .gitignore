@@ -6,6 +6,10 @@ downloads/
 .DS_Store
 apps/track_notify/.state/
 apps/logistics_bot/.state/
+apps/lcl_bot/Excel_Files/
+apps/lcl_bot/Workflow_State/
+!apps/lcl_bot/Excel_Files/.gitkeep
+!apps/lcl_bot/Workflow_State/.gitkeep
 deploy/deploy.env
 
 # Sync Excel data (local/ops only); keep docs

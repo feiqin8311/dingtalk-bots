@@ -34,6 +34,11 @@ def _load_router_module():
 
     pinxiang_mod.PinxiangBotHandler = MagicMock(side_effect=_make_handler)
 
+    lcl_handlers_mod = types.ModuleType("lcl_bot.handlers")
+    lcl_handlers_mod.WorkflowBotHandler = MagicMock(side_effect=_make_handler)
+    lcl_pkg = types.ModuleType("lcl_bot")
+    lcl_pkg.handlers = lcl_handlers_mod
+
     class _Loader:
         def exec_module(self, mod):
             mod.PinxiangBotHandler = pinxiang_mod.PinxiangBotHandler
@@ -51,6 +56,8 @@ def _load_router_module():
             "Bot.runtime": MagicMock(collect_download_codes=lambda payload: payload.get("downloadCodes", [])),
             "Utils.dingtalk_api": MagicMock(),
             "pinxiang_bot_handler": pinxiang_mod,
+            "lcl_bot": lcl_pkg,
+            "lcl_bot.handlers": lcl_handlers_mod,
         },
     ):
         sys.modules["dingtalk_stream"].ChatbotHandler = object
@@ -86,6 +93,17 @@ class LogisticsRouterTests(unittest.TestCase):
 
     def test_menu_choice_selects_pinxiang_branch(self):
         self.assertEqual(self.router._route({"text": {"content": "3"}}, user_id="u1"), "select_pinxiang")
+
+    def test_menu_choice_selects_lcl_branch(self):
+        self.assertEqual(self.router._route({"text": {"content": "4"}}, user_id="u1"), "select_lcl")
+
+    def test_lcl_branch_keeps_messages(self):
+        self.router._set_branch("u1", "lcl")
+        self.assertEqual(self.router._route({"text": {"content": "确认"}}, user_id="u1"), "lcl")
+        self.assertEqual(
+            self.router._route({"downloadCodes": ["x"], "text": {"content": ""}}, user_id="u1"),
+            "lcl",
+        )
 
     def test_selected_branch_routes_plain_text_to_cp(self):
         self.router._set_branch("u1", "cp")

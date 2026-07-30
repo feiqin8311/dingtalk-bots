@@ -61,6 +61,7 @@ def load_config_from_env() -> LogisticsBotConfig:
             ROOT_DIR / "apps" / "cp_bot" / ".env",
             ROOT_DIR / "apps" / "split_bot" / ".env",
             ROOT_DIR / "apps" / "pinxiang_bot" / ".env",
+            ROOT_DIR / "apps" / "lcl_bot" / ".env",
             Path.cwd() / ".env",
         ]
     )

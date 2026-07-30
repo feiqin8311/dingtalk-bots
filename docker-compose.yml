@@ -29,6 +29,7 @@ services:
       ADDRESS_BOOK_XLSX_PATH: /app/files/全站点地址.xlsx
       PINXIANG_PRODUCT_INFO_PATH: /app/files/产品信息单证专用.xlsx
       PINXIANG_WORKSPACE: /app/apps/pinxiang_bot/.bot-workspace
+      LCL_BASE_DIR: /app/apps/lcl_bot
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -38,10 +39,13 @@ services:
       - ./apps/cp_bot:/app/apps/cp_bot
       - ./apps/split_bot:/app/apps/split_bot
       - ./apps/pinxiang_bot:/app/apps/pinxiang_bot
+      - ./apps/lcl_bot:/app/apps/lcl_bot
       - ./files:/app/files:ro
       - ./apps/cp_bot/downloads:/app/apps/cp_bot/downloads
       - ./apps/split_bot/.bot-workspace:/app/apps/split_bot/.bot-workspace
       - ./apps/pinxiang_bot/.bot-workspace:/app/apps/pinxiang_bot/.bot-workspace
+      - ./apps/lcl_bot/Excel_Files:/app/apps/lcl_bot/Excel_Files
+      - ./apps/lcl_bot/Workflow_State:/app/apps/lcl_bot/Workflow_State
       - ./apps/logistics_bot/.state:/app/apps/logistics_bot/.state
     command: ["python", "apps/logistics_bot/main.py"]
 
