@@ -503,19 +503,8 @@ def _deliver_excel_reports(
                 for ek in item.keys_to_mark():
                     store.mark_event(item.shipment_key, ek, item.message)
 
-    notifier = None
-    if not dry_run and config.send_excel:
-        if not config.ding_client_id or not config.ding_client_secret or not config.ding_robot_code:
-            logger.error("missing ding credentials/robot_code, cannot send excel")
-        else:
-            from apps.cp_bot.api.dingtalk_client import DingTalkNotifier
-
-            notifier = DingTalkNotifier(
-                app_key=config.ding_client_id,
-                app_secret=config.ding_client_secret,
-                robot_code=config.ding_robot_code,
-            )
-
+    # 先写盘，再发钉钉：发送侧 import 失败时也要有 Excel 可查
+    prepared: list[tuple[str, Path, list[ReportItem]]] = []
     for user_id, user_items in by_user.items():
         seen: set[tuple[str, str]] = set()
         unique: list[ReportItem] = []
@@ -525,14 +514,35 @@ def _deliver_excel_reports(
                 continue
             seen.add(k)
             unique.append(it)
-
         path = export_dir / export_filename(user_id=user_id, when=when)
         write_report_xlsx(unique, path)
         stats["excel_files"] += 1
+        prepared.append((user_id, path, unique))
+
+    notifier = None
+    if not dry_run and config.send_excel:
+        if not config.ding_client_id or not config.ding_client_secret or not config.ding_robot_code:
+            logger.error("missing ding credentials/robot_code, cannot send excel")
+        else:
+            try:
+                # cp_bot.api.config 依赖 apps/cp_bot 在 sys.path（独立子进程无 logistics 环境）
+                cp_dir = str(ROOT_DIR / "apps" / "cp_bot")
+                if cp_dir not in sys.path:
+                    sys.path.insert(0, cp_dir)
+                from api.dingtalk_client import DingTalkNotifier  # noqa: WPS433
+
+                notifier = DingTalkNotifier(
+                    app_key=config.ding_client_id,
+                    app_secret=config.ding_client_secret,
+                    robot_code=config.ding_robot_code,
+                )
+            except Exception:
+                logger.exception("DingTalkNotifier import/init failed")
+
+    for user_id, path, unique in prepared:
         if dry_run:
             logger.info("[dry-run] excel owner=%s path=%s rows=%s", user_id, path, len(unique))
             continue
-        # 暂时只落盘：写 Excel + 记状态，不推钉钉
         if not config.send_excel:
             logger.info(
                 "[excel-only] owner=%s path=%s rows=%s (TRACK_SEND_EXCEL off)",
@@ -546,9 +556,9 @@ def _deliver_excel_reports(
             continue
         if notifier is None:
             stats["excel_failed"] += 1
+            logger.error("excel not sent owner=%s path=%s (notifier unavailable)", user_id, path)
             continue
         try:
-            # 只发 Excel，不发文字说明
             notifier.send_user_file(user_id, str(path))
             stats["excel_sent"] += 1
             logger.info("excel sent owner=%s path=%s rows=%s", user_id, path, len(unique))
