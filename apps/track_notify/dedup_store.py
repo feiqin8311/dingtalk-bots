@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Any
 
 
 class TrackStateStore:
     """
     - notified_events: 指定业务节点去重（同一单号同一 milestone 只推一次）
+    - pending_report_items: 本轮已查出、尚未推送/落盘成功的行（防进程被杀丢结果）
     - checked_records: 遗留表（方案 A 整行跳过已废弃，仍可手工查）
     Thread-safe for concurrent row queries (AGL is slow; we parallelize).
     """
@@ -37,6 +40,18 @@ class TrackStateStore:
                 invoice_no TEXT,
                 checked_at TEXT NOT NULL DEFAULT (datetime('now')),
                 note TEXT
+            )
+            """
+        )
+        # 查一行记一行：完整 ReportItem JSON，发送/落盘成功后再删
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_report_items (
+                shipment_key TEXT NOT NULL,
+                event_key TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (shipment_key, event_key)
             )
             """
         )
@@ -91,6 +106,62 @@ class TrackStateStore:
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+    def sync_pending_items(self, items: list[dict[str, Any]]) -> None:
+        """用当前 bucket 全量覆盖 pending（查一行后调用，崩溃可恢复）。"""
+        with self._lock:
+            self._conn.execute("DELETE FROM pending_report_items")
+            for raw in items:
+                sk = str(raw.get("shipment_key") or "")
+                ek = str(raw.get("event_key") or "")
+                if not sk or not ek:
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO pending_report_items (shipment_key, event_key, payload)
+                    VALUES (?,?,?)
+                    """,
+                    (sk, ek, json.dumps(raw, ensure_ascii=False)),
+                )
+            self._conn.commit()
+
+    def load_pending_items(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT payload FROM pending_report_items ORDER BY updated_at, shipment_key, event_key"
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for (payload,) in rows:
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                out.append(data)
+        return out
+
+    def clear_pending_for(self, pairs: list[tuple[str, str]]) -> None:
+        if not pairs:
+            return
+        with self._lock:
+            for sk, ek in pairs:
+                self._conn.execute(
+                    "DELETE FROM pending_report_items WHERE shipment_key=? AND event_key=?",
+                    (sk, ek),
+                )
+            self._conn.commit()
+
+    def clear_all_pending(self) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM pending_report_items")
+            self._conn.commit()
+
+    def pending_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM pending_report_items"
+            ).fetchone()
+            return int(row[0]) if row else 0
 
     # 兼容旧名
     def has(self, shipment_key: str, event_key: str) -> bool:

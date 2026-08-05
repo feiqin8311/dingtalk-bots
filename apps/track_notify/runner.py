@@ -5,8 +5,10 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parents[1]
@@ -32,6 +34,36 @@ def _carrier_kind(carrier: str) -> str:
     if "平谊" in text:
         return "pingyi"
     return "unknown"
+
+
+def _item_to_dict(item: ReportItem) -> dict[str, Any]:
+    return asdict(item)
+
+
+def _item_from_dict(raw: dict[str, Any]) -> ReportItem:
+    return ReportItem(
+        shipment_key=str(raw.get("shipment_key") or ""),
+        event_key=str(raw.get("event_key") or ""),
+        message=str(raw.get("message") or ""),
+        user_ids=list(raw.get("user_ids") or []),
+        invoice_no=str(raw.get("invoice_no") or ""),
+        brand=str(raw.get("brand") or ""),
+        country=str(raw.get("country") or ""),
+        fba_code=str(raw.get("fba_code") or ""),
+        logistics_no=str(raw.get("logistics_no") or ""),
+        carrier=str(raw.get("carrier") or ""),
+        shipped_at=str(raw.get("shipped_at") or ""),
+        eta_date=str(raw.get("eta_date") or ""),
+        delivered_at=str(raw.get("delivered_at") or ""),
+        owners=str(raw.get("owners") or ""),
+        detail=str(raw.get("detail") or ""),
+        event_keys=list(raw.get("event_keys") or []),
+    )
+
+
+def _checkpoint_bucket(store: TrackStateStore, bucket: list[ReportItem]) -> None:
+    """查一行记一行：整表快照进 sqlite，进程被杀可恢复。"""
+    store.sync_pending_items([_item_to_dict(it) for it in bucket])
 
 
 def _row_base(row: TableRow) -> dict[str, str]:
@@ -621,9 +653,12 @@ def _deliver_excel_reports(
         stats["excel_files"] += 1
         logger.warning("excel for no-owner rows path=%s rows=%s", path, len(no_owner))
         if not dry_run:
+            cleared_no: list[tuple[str, str]] = []
             for item in no_owner:
                 for ek in item.keys_to_mark():
                     store.mark_event(item.shipment_key, ek, item.message)
+                cleared_no.append((item.shipment_key, item.event_key))
+            store.clear_pending_for(cleared_no)
 
     # 先写盘，再发钉钉：发送侧 import 失败时也要有 Excel 可查
     prepared: list[tuple[str, Path, list[ReportItem]]] = []
@@ -672,9 +707,12 @@ def _deliver_excel_reports(
                 path,
                 len(unique),
             )
+            cleared: list[tuple[str, str]] = []
             for item in unique:
                 for ek in item.keys_to_mark():
                     store.mark_event(item.shipment_key, ek, item.message)
+                cleared.append((item.shipment_key, item.event_key))
+            store.clear_pending_for(cleared)
             continue
         if notifier is None:
             stats["excel_failed"] += 1
@@ -684,9 +722,12 @@ def _deliver_excel_reports(
             notifier.send_user_file(user_id, str(path))
             stats["excel_sent"] += 1
             logger.info("excel sent owner=%s path=%s rows=%s", user_id, path, len(unique))
+            cleared = []
             for item in unique:
                 for ek in item.keys_to_mark():
                     store.mark_event(item.shipment_key, ek, item.message)
+                cleared.append((item.shipment_key, item.event_key))
+            store.clear_pending_for(cleared)
         except Exception as exc:
             stats["excel_failed"] += 1
             logger.exception("excel send failed owner=%s: %s", user_id, exc)
@@ -727,6 +768,7 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
         "query_issues": 0,
         "gateway_retry": 0,
         "gateway_recovered": 0,
+        "pending_resumed": 0,
         "excel_rows": 0,
         "excel_files": 0,
         "excel_sent": 0,
@@ -734,6 +776,25 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
     }
     issue_lines: list[str] = []
     try:
+        # 崩溃恢复：上次已查出未推送的行先落盘/推送，避免白跑
+        if not dry_run:
+            leftover = [_item_from_dict(r) for r in store.load_pending_items()]
+            if leftover:
+                logger.info(
+                    "resume pending report items count=%s (checkpoint from prior run)",
+                    len(leftover),
+                )
+                stats["pending_resumed"] = len(leftover)
+                resume_deliver = _deliver_excel_reports(
+                    leftover,
+                    config=config,
+                    store=store,
+                    dry_run=False,
+                    logger=logger,
+                )
+                for k, v in resume_deliver.items():
+                    stats[k] = stats.get(k, 0) + v
+
         rows = table.iter_candidate_rows(
             config.dingtalk_doc_key,
             config.dingtalk_sheet_id,
@@ -787,6 +848,9 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                 if issues:
                     stats["query_issues"] += len(issues)
                     issue_lines.extend(issues)
+                # 跑一个记一个（整表快照，含本行结果）
+                if not dry_run:
+                    _checkpoint_bucket(store, bucket)
 
         # 龙舟瞬时失败：全量结束后再串行重查 1 轮 query_error
         retry_stats = _retry_longzhou_query_errors(
@@ -807,6 +871,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                 in {"query_error", "no_track", "missing_fba", "missing_logistics_no", "gateway_missing"}
             ]
             stats["query_issues"] = len(issue_lines)
+        if not dry_run:
+            _checkpoint_bucket(store, bucket)
 
         deliver = _deliver_excel_reports(
             bucket,
