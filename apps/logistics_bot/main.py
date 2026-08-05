@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 from pathlib import Path
 
 
@@ -24,6 +25,40 @@ import websockets
 from settings import load_config_from_env
 from router import LogisticsRouter
 from shared.logging import setup_logger
+
+
+def _start_track_notify_daemon(logger) -> None:
+    """Mon/Wed 00:00 轨迹查询，挂在主进程后台线程，不另起容器。"""
+    import importlib.util
+
+    track_main_path = ROOT_DIR / "apps" / "track_notify" / "main.py"
+    if not track_main_path.is_file():
+        logger.warning("track_notify: main.py missing, scheduler disabled")
+        return
+    spec = importlib.util.spec_from_file_location("track_notify_main", track_main_path)
+    if not spec or not spec.loader:
+        logger.warning("track_notify: cannot load main.py, scheduler disabled")
+        return
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["track_notify_main"] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        logger.exception("track_notify: import failed, scheduler disabled")
+        return
+    run_daemon = getattr(mod, "run_daemon", None)
+    if not callable(run_daemon):
+        logger.warning("track_notify: run_daemon missing, scheduler disabled")
+        return
+
+    def _target() -> None:
+        try:
+            run_daemon(dry_run=False)
+        except Exception:
+            logger.exception("track_notify daemon crashed")
+
+    threading.Thread(target=_target, name="track-notify", daemon=True).start()
+    logger.info("track_notify background scheduler started (Mon/Wed 00:00 Asia/Shanghai)")
 
 
 class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):
@@ -61,6 +96,7 @@ class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):
 def main() -> None:
     logger = setup_logger("%(asctime)s %(name)s %(levelname)-8s %(message)s", "INFO")
     config = load_config_from_env()
+    _start_track_notify_daemon(logger)
     credential = dingtalk_stream.Credential(config.client_id, config.client_secret)
     client = ResilientDingTalkStreamClient(
         credential,

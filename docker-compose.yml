@@ -23,6 +23,8 @@ services:
         required: false
       - path: ./apps/pinxiang_bot/.env
         required: false
+      - path: ./apps/track_notify/.env
+        required: false
     environment:
       TZ: Asia/Shanghai
       # 同步文件统一目录：宿主机 ./files → 容器 /app/files
@@ -30,6 +32,7 @@ services:
       PINXIANG_PRODUCT_INFO_PATH: /app/files/产品信息单证专用.xlsx
       PINXIANG_WORKSPACE: /app/apps/pinxiang_bot/.bot-workspace
       LCL_BASE_DIR: /app/apps/lcl_bot
+      TRACK_NOTIFY_STATE_DIR: /app/apps/track_notify/.state
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -40,6 +43,7 @@ services:
       - ./apps/split_bot:/app/apps/split_bot
       - ./apps/pinxiang_bot:/app/apps/pinxiang_bot
       - ./apps/lcl_bot:/app/apps/lcl_bot
+      - ./apps/track_notify:/app/apps/track_notify
       - ./files:/app/files:ro
       - ./apps/cp_bot/downloads:/app/apps/cp_bot/downloads
       - ./apps/split_bot/.bot-workspace:/app/apps/split_bot/.bot-workspace
@@ -47,6 +51,7 @@ services:
       - ./apps/lcl_bot/Excel_Files:/app/apps/lcl_bot/Excel_Files
       - ./apps/lcl_bot/Workflow_State:/app/apps/lcl_bot/Workflow_State
       - ./apps/logistics_bot/.state:/app/apps/logistics_bot/.state
+      - ./apps/track_notify/.state:/app/apps/track_notify/.state
     command: ["python", "apps/logistics_bot/main.py"]
 
   dingtalk-cp-bot:

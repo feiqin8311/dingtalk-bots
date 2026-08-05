@@ -79,6 +79,7 @@ remote "mkdir -p \
   '${DEPLOY_PATH}/apps/pinxiang_bot/.bot-workspace' \
   '${DEPLOY_PATH}/apps/lcl_bot/Excel_Files' \
   '${DEPLOY_PATH}/apps/lcl_bot/Workflow_State' \
+  '${DEPLOY_PATH}/apps/track_notify/.state' \
   '${DEPLOY_PATH}/files'"
 
 if [[ "$REBUILD" -eq 1 ]]; then
@@ -88,10 +89,12 @@ if [[ "$REBUILD" -eq 1 ]]; then
            BUILD_HTTPS_PROXY='${BUILD_HTTPS_PROXY}' \
            BUILD_NO_PROXY='${BUILD_NO_PROXY}' && \
     docker compose build dingtalk-bot && \
-    docker compose up -d --force-recreate dingtalk-bot"
+    docker compose up -d --force-recreate dingtalk-bot && \
+    docker compose rm -f -s dingtalk-track-notify 2>/dev/null || true"
 else
   echo "==> restart (source mounts, no rebuild)"
-  remote "cd '${DEPLOY_PATH}' && docker compose up -d --force-recreate --no-build dingtalk-bot"
+  remote "cd '${DEPLOY_PATH}' && docker compose up -d --force-recreate --no-build dingtalk-bot && \
+    docker compose rm -f -s dingtalk-track-notify 2>/dev/null || true"
 fi
 
 echo "==> health"

@@ -45,6 +45,7 @@ COPY apps/split_bot /app/apps/split_bot
 COPY apps/logistics_bot /app/apps/logistics_bot
 COPY apps/pinxiang_bot /app/apps/pinxiang_bot
 COPY apps/lcl_bot /app/apps/lcl_bot
+COPY apps/track_notify /app/apps/track_notify
 RUN mkdir -p \
     /app/files \
     /app/apps/cp_bot/downloads \
@@ -52,6 +53,7 @@ RUN mkdir -p \
     /app/apps/pinxiang_bot/.bot-workspace \
     /app/apps/lcl_bot/Excel_Files \
     /app/apps/lcl_bot/Workflow_State \
-    /app/apps/logistics_bot/.state
+    /app/apps/logistics_bot/.state \
+    /app/apps/track_notify/.state
 
 CMD ["python", "apps/logistics_bot/main.py"]
