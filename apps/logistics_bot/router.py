@@ -392,17 +392,21 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             self._save_branch_state_unlocked()
         self.split_handler._pending_uploads.pop(user_id, None)
         self.split_handler._pending_confirmations.pop(user_id, None)
+        # 拼箱：只清物流侧待办，不影响运营 active/queue
         clear = getattr(self.pinxiang_handler, "clear_user", None)
         if callable(clear):
             clear(user_id)
-        # lcl 全局单工作流：从分仓分支重置时清状态
+        # lcl：物流重置只清物流会话，保留运营进行中的单与队列
         if prev == "lcl":
             try:
                 sm = getattr(self.lcl_handler, "state_manager", None)
-                if sm is not None and hasattr(sm, "reset"):
-                    sm.reset()
+                if sm is not None:
+                    if hasattr(sm, "reset_logistics_only"):
+                        sm.reset_logistics_only()
+                    elif hasattr(sm, "release_logistics_session"):
+                        sm.release_logistics_session()
             except Exception as exc:
-                self.logger.warning("lcl state reset failed: %s", exc)
+                self.logger.warning("lcl logistics-only reset failed: %s", exc)
 
     @staticmethod
     def _extract_user_id(payload: dict) -> str:

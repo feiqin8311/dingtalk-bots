@@ -447,6 +447,22 @@ class StateManager:
         """获取领星发货单号列表"""
         return self.state.get('lingxing_shipment_numbers')
     
+    def reset_logistics_only(self) -> None:
+        """物流【重置】专用：只清物流会话，完整保留所有运营 active/queue。"""
+        ops_active = dict(self.state.get("ops_active") or {})
+        ops_queue = dict(self.state.get("ops_queue") or {})
+        self.state = self._get_default_state()
+        self.state["ops_active"] = ops_active
+        self.state["ops_queue"] = ops_queue
+        self.state["logistics_phase"] = "IDLE"
+        if ops_active:
+            pick_id = next(iter(ops_active.keys()))
+            # 不设 needs_push，避免重复推送进行中的单
+            self.activate_ops_job(pick_id, ops_active[pick_id])
+        else:
+            self._save_state()
+        print(f"✅ 物流会话已重置(运营流程不受影响) active={len(ops_active)} queue={len(ops_queue)}")
+
     def reset(self):
         """结束当前运营单并重置；保留其他运营的 active/queue，物流可接单。"""
         ops_active = dict(self.state.get("ops_active") or {})

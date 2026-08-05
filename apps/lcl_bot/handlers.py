@@ -1909,7 +1909,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 self.logger.warning(f"清理流程文件夹失败 {target_folder}: {exc}")
     
     def _handle_reset_command(self, incoming_message, user_role: str):
-        """处理重置命令"""
+        """处理重置命令：物流只清自己会话，不影响运营进行中/排队任务。"""
         # 只有物流人员可以重置
         if user_role != 'logistics':
             self._send_text_reply(
@@ -1918,26 +1918,46 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             )
             return
         
-        current_status = self.state_manager.get_status()
-        
-        if current_status == WorkflowState.IDLE:
-            self._send_text_reply(
-                "ℹ️  当前已是空闲状态，无需重置",
-                incoming_message
-            )
+        if self.state_manager.can_logistics_upload() and self.state_manager.logistics_phase() == "IDLE":
+            # 无物流进行中；若仅有运营任务在跑，也提示不伤运营
+            active_n = len(self.state_manager.state.get("ops_active") or {})
+            if active_n:
+                self._send_text_reply(
+                    "ℹ️  当前没有物流进行中的上传/确认。\n"
+                    f"运营侧仍有 {active_n} 单在处理，不会被重置。\n"
+                    "可直接上传新发货单。",
+                    incoming_message,
+                )
+            else:
+                self._send_text_reply(
+                    "ℹ️  当前已是空闲状态，无需重置",
+                    incoming_message,
+                )
             return
-        
-        # 执行重置
-        self._cleanup_workflow_files()
-        self._reset_workflow()
+
+        # 只清物流会话目录（若该目录仍被运营 active 引用则跳过删除）
+        folder = self.state_manager.get_workflow_folder_path()
+        protected = set()
+        for job in (self.state_manager.state.get("ops_active") or {}).values():
+            if isinstance(job, dict) and job.get("workflow_folder_path"):
+                protected.add(job["workflow_folder_path"])
+        for jobs in (self.state_manager.state.get("ops_queue") or {}).values():
+            for job in jobs or []:
+                if isinstance(job, dict) and job.get("workflow_folder_path"):
+                    protected.add(job["workflow_folder_path"])
+        if folder and folder not in protected:
+            self._cleanup_workflow_files(folder)
+
+        self.state_manager.reset_logistics_only()
         
         self._send_text_reply(
-            "✅ 状态已重置，可以开始新的流程\n"
+            "✅ 物流侧已重置，可以开始新的流程。\n"
+            "运营人员正在处理/排队的任务不受影响。\n"
             "请上传发货单Excel文件开始处理。",
             incoming_message
         )
         
-        self.logger.info("状态已被手动重置")
+        self.logger.info("物流会话已手动重置（运营流程保留）")
     
     async def _handle_get_file(self, incoming_message, user_role: str):
         """处理获取拼箱结果文件"""

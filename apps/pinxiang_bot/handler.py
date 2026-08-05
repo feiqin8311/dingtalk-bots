@@ -314,8 +314,13 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             return False
 
         if normalized in {"取消", "cancel", "取消拼箱"}:
-            self._drop_user_pending(user_id)
-            await self._send_text(user_id, "已取消本次拼箱任务。")
+            # 运营取消：只清自己当前单/队列；物流取消：只清物流待办，不动运营
+            if user_id in self._pending_ops or self._ops_queue.get(user_id):
+                self._drop_ops_pending_only(user_id)
+                await self._send_text(user_id, "已取消您当前的运营任务（含队列）。")
+            else:
+                self._drop_logistics_pending_only(user_id)
+                await self._send_text(user_id, "已取消本次拼箱任务（不影响运营侧进行中的单）。")
             return True
 
         if normalized in {"模板2", "模板 2", "生成模板2", "重新生成模板2", "template2", "template 2"}:
@@ -769,7 +774,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 self._save_pending_state_unlocked()
 
     def clear_user(self, user_id: str) -> None:
-        self._drop_user_pending(user_id)
+        """路由【重置】：只清该用户物流侧待办，绝不碰运营 active/queue。"""
+        self._drop_logistics_pending_only(user_id)
 
     def has_pending(self, user_id: str) -> bool:
         if not user_id:
@@ -786,14 +792,29 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             self._pending_logistics[user_id] = pending
             self._save_pending_state_unlocked()
 
-    def _drop_user_pending(self, user_id: str) -> None:
+    def _drop_logistics_pending_only(self, user_id: str) -> None:
         if not user_id:
             return
         with self._pending_lock:
             self._pending_logistics.pop(user_id, None)
+            self._save_pending_state_unlocked()
+
+    def _drop_ops_pending_only(self, user_id: str) -> None:
+        if not user_id:
+            return
+        with self._pending_lock:
             self._pending_ops.pop(user_id, None)
             self._ops_queue.pop(user_id, None)
             self._save_pending_state_unlocked()
+
+    def _drop_user_pending(self, user_id: str) -> None:
+        """兼容旧调用：按角色拆清（优先运营键，否则物流）。"""
+        if not user_id:
+            return
+        if user_id in self._pending_ops or self._ops_queue.get(user_id):
+            self._drop_ops_pending_only(user_id)
+            return
+        self._drop_logistics_pending_only(user_id)
 
     def _persist_pending_state(self) -> None:
         with self._pending_lock:
