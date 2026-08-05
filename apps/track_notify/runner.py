@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from datetime import datetime
@@ -434,6 +435,127 @@ def _process_longzhou_row(
         )
     return notified, query_ok, issues
 
+
+def _retry_longzhou_query_errors(
+    bucket: list[ReportItem],
+    rows: list[TableRow],
+    *,
+    gateway: LogisticsGatewayClient | None,
+    store: TrackStateStore,
+    logger: logging.Logger,
+    pause_sec: float = 3.0,
+) -> dict[str, int]:
+    """
+    本轮全部查完后：对龙舟 query_error 再串行重查 1 次（瞬时 AGL 失败）。
+    成功则从 bucket 去掉 error，写入节点（若有）；仍失败则保留原问题行。
+    """
+    stats = {"gateway_retry": 0, "gateway_recovered": 0}
+    if gateway is None:
+        return stats
+
+    by_no: dict[str, TableRow] = {}
+    for row in rows:
+        if _carrier_kind(row.carrier) != "longzhou":
+            continue
+        for no in row.logistics_nos:
+            key = (no or "").strip()
+            if key:
+                by_no[key] = row
+
+    targets: list[tuple[TableRow, str]] = []
+    seen_no: set[str] = set()
+    for it in bucket:
+        if it.event_key != "query_error":
+            continue
+        no = (it.logistics_no or it.shipment_key or "").strip()
+        if not no or no not in by_no or no in seen_no:
+            continue
+        seen_no.add(no)
+        targets.append((by_no[no], no))
+
+    if not targets:
+        return stats
+
+    logger.info(
+        "longzhou retry pass count=%s pause=%ss (serial)",
+        len(targets),
+        pause_sec,
+    )
+    stats["gateway_retry"] = len(targets)
+
+    for i, (row, logistics_no) in enumerate(targets):
+        if i > 0 and pause_sec > 0:
+            time.sleep(pause_sec)
+        brand = (row.brand or "").strip()
+        fba_joined = ",".join(row.fba_codes)
+        ok_uids = notify_user_ids(row.owners, issue=False)
+        issue_uids = notify_user_ids(row.owners, issue=True)
+        try:
+            shipment = gateway.query_longzhou(
+                logistics_no, brand=brand, platform="agl"
+            )
+        except Exception as exc:
+            logger.warning(
+                "longzhou retry still failed logistics_no=%s brand=%s: %s",
+                logistics_no,
+                brand,
+                exc,
+            )
+            continue
+
+        # 去掉本单首次 query_error（无论成功有轨迹 / 确认无轨迹）
+        bucket[:] = [
+            it
+            for it in bucket
+            if not (
+                it.event_key == "query_error" and it.shipment_key == logistics_no
+            )
+        ]
+        stats["gateway_recovered"] += 1
+
+        if shipment is None:
+            line = _no_track_line(row, logistics_no)
+            logger.info(
+                "longzhou retry no track logistics_no=%s record=%s",
+                logistics_no,
+                row.record_id,
+            )
+            _collect_once(
+                shipment_key=logistics_no,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=fba_joined,
+                logistics_no=logistics_no,
+                detail=line,
+                logger=logger,
+            )
+            continue
+
+        logger.info(
+            "longzhou retry ok logistics_no=%s brand=%s events=%s latest=%s",
+            logistics_no,
+            brand,
+            len(shipment.events),
+            shipment.track_status_name,
+        )
+        _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=logistics_no,
+            display_code=logistics_no,
+            kind="longzhou",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return stats
+
+
 def _process_row(
     row: TableRow,
     *,
@@ -603,6 +725,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
         "collected": 0,
         "missing_key": 0,
         "query_issues": 0,
+        "gateway_retry": 0,
+        "gateway_recovered": 0,
         "excel_rows": 0,
         "excel_files": 0,
         "excel_sent": 0,
@@ -663,6 +787,26 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                 if issues:
                     stats["query_issues"] += len(issues)
                     issue_lines.extend(issues)
+
+        # 龙舟瞬时失败：全量结束后再串行重查 1 轮 query_error
+        retry_stats = _retry_longzhou_query_errors(
+            bucket,
+            pending,
+            gateway=gateway,
+            store=store,
+            logger=logger,
+            pause_sec=3.0,
+        )
+        stats.update(retry_stats)
+        # 重试后问题行可能变少，issue 摘要以 bucket 为准
+        if retry_stats.get("gateway_recovered"):
+            issue_lines = [
+                it.detail or it.message
+                for it in bucket
+                if it.event_key
+                in {"query_error", "no_track", "missing_fba", "missing_logistics_no", "gateway_missing"}
+            ]
+            stats["query_issues"] = len(issue_lines)
 
         deliver = _deliver_excel_reports(
             bucket,
