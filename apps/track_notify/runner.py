@@ -582,6 +582,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             config.gateway_base_url,
             config.gateway_api_key,
             timeout_sec=config.gateway_timeout_sec,
+            max_concurrent=config.gateway_max_concurrent,
+            min_interval_sec=config.gateway_min_interval_sec,
         )
     store = TrackStateStore(config.state_db_path)
     bucket: list[ReportItem] = []
@@ -611,12 +613,15 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
 
         workers = max(1, min(config.query_workers, len(pending) or 1))
         logger.info(
-            "candidates carriers=%s ship_year=%s count=%s pending=%s workers=%s timeout=%ss",
+            "candidates carriers=%s ship_year=%s count=%s pending=%s "
+            "row_workers=%s gateway_concurrent=%s gateway_interval=%ss timeout=%ss",
             ",".join(config.carrier_keywords),
             config.ship_year,
             len(rows),
             len(pending),
             workers,
+            config.gateway_max_concurrent,
+            config.gateway_min_interval_sec,
             int(config.gateway_timeout_sec),
         )
 

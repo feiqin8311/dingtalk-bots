@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -27,7 +29,11 @@ def normalize_agl_time(raw: str) -> str:
 
 
 class LogisticsGatewayClient:
-    """公网物流查询网关：龙舟 AGL 直查走 /api/fba/query。"""
+    """公网物流查询网关：龙舟 AGL 直查走 /api/fba/query。
+
+    AGL 单票慢且易被并行打挂：默认全进程串行（max_concurrent=1）。
+    行级 ThreadPool 仍可并行平谊；龙舟在进网关时排队。
+    """
 
     def __init__(
         self,
@@ -35,6 +41,8 @@ class LogisticsGatewayClient:
         api_key: str,
         *,
         timeout_sec: float = 240,
+        max_concurrent: int = 1,
+        min_interval_sec: float = 0.0,
     ) -> None:
         if not base_url:
             raise ValueError("gateway base_url required")
@@ -43,6 +51,11 @@ class LogisticsGatewayClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_sec = timeout_sec
+        # ponytail: AGL 怕并发；默认 1 路。要加速可调 LOGISTICS_GATEWAY_MAX_CONCURRENT
+        self._sem = threading.Semaphore(max(1, int(max_concurrent)))
+        self._min_interval = max(0.0, float(min_interval_sec))
+        self._pace_lock = threading.Lock()
+        self._last_start = 0.0
 
     def query_longzhou(
         self,
@@ -68,7 +81,14 @@ class LogisticsGatewayClient:
         if brand:
             payload["brand"] = brand
 
-        body = self._post_json("/api/fba/query", payload)
+        with self._sem:
+            if self._min_interval > 0:
+                with self._pace_lock:
+                    wait = self._min_interval - (time.monotonic() - self._last_start)
+                    if wait > 0:
+                        time.sleep(wait)
+                    self._last_start = time.monotonic()
+            body = self._post_json("/api/fba/query", payload)
         if not body.get("success"):
             err = body.get("error") or str(body)
             if any(x in str(err) for x in ("不存在", "未找到", "无轨迹", "no track")):

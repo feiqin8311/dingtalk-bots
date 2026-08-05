@@ -55,7 +55,9 @@ python3 apps/track_notify/main.py FBA19JTBN929 --dry-run
 | `PINGYI_*` | 平谊 API |
 | `LOGISTICS_GATEWAY_BASE_URL` / `LOGISTICS_GATEWAY_API_KEY` | 龙舟网关 |
 | `LOGISTICS_GATEWAY_TIMEOUT_SEC` | 单次 AGL 超时，默认 `240`（实测 ~80s） |
-| `TRACK_QUERY_WORKERS` | 行级并发，默认 `4`（~45 龙舟 ×80s /4 ≈ 15min） |
+| `TRACK_QUERY_WORKERS` | 行级线程池，默认 `4`（主要加速平谊） |
+| `LOGISTICS_GATEWAY_MAX_CONCURRENT` | 龙舟 AGL 网关并发，**默认 `1` 串行**，护网关 |
+| `LOGISTICS_GATEWAY_MIN_INTERVAL_SEC` | AGL 两次请求最小间隔秒，默认 `0` |
 | `TRACK_SEND_EXCEL` | 是否钉钉推送，默认 `0` 只落盘 `exports/`；`1` 推送给负责人 |
 | `TRACK_CARRIER_KEYWORDS` | 默认 `平谊,龙舟` |
 | `TRACK_SHIP_YEAR` | 发货时间年份，默认 `2026`；`all` 不限 |

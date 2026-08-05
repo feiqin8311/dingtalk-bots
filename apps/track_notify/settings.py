@@ -29,6 +29,10 @@ class TrackNotifyConfig:
     gateway_base_url: str
     gateway_api_key: str
     gateway_timeout_sec: float
+    # 龙舟 AGL 网关并发（默认 1=串行，护网关）
+    gateway_max_concurrent: int
+    # 两次 AGL 请求启动间隔秒数（0=不额外间隔；串行时单票已 ~80s）
+    gateway_min_interval_sec: float
     dingtalk_doc_key: str
     dingtalk_sheet_id: str
     dingtalk_view_id: str
@@ -39,7 +43,7 @@ class TrackNotifyConfig:
     carrier_keywords: tuple[str, ...]
     ship_year: int | None
     state_dir: Path
-    # AGL ~80s/单；并发查几十条，默认 4（约 45×80s/4 ≈ 15min）
+    # 行级线程池：平谊可并行；龙舟在网关侧再闸门
     query_workers: int
     # 是否钉钉推送 Excel；False 时只落盘 exports/（暂时默认关）
     send_excel: bool
@@ -110,7 +114,22 @@ def load_config_from_env() -> TrackNotifyConfig:
     except ValueError:
         gateway_timeout = 240.0
     try:
-        # ponytail: AGL 串行不可用；默认 4，环境可调 1–16
+        # 龙舟 AGL 默认串行，避免并行打挂浏览器/会话
+        gateway_max_concurrent = int(
+            (os.getenv("LOGISTICS_GATEWAY_MAX_CONCURRENT") or "1").strip()
+        )
+    except ValueError:
+        gateway_max_concurrent = 1
+    gateway_max_concurrent = max(1, min(8, gateway_max_concurrent))
+    try:
+        gateway_min_interval = float(
+            (os.getenv("LOGISTICS_GATEWAY_MIN_INTERVAL_SEC") or "0").strip()
+        )
+    except ValueError:
+        gateway_min_interval = 0.0
+    gateway_min_interval = max(0.0, min(60.0, gateway_min_interval))
+    try:
+        # 行级并发主要利好平谊；龙舟仍受 gateway_max_concurrent 限制
         query_workers = int((os.getenv("TRACK_QUERY_WORKERS") or "4").strip())
     except ValueError:
         query_workers = 4
@@ -136,6 +155,8 @@ def load_config_from_env() -> TrackNotifyConfig:
         ).strip(),
         gateway_api_key=gateway_key,
         gateway_timeout_sec=max(30.0, gateway_timeout),
+        gateway_max_concurrent=gateway_max_concurrent,
+        gateway_min_interval_sec=gateway_min_interval,
         dingtalk_doc_key=(
             os.getenv("TRACK_DINGTALK_DOC_KEY") or "R1zknDm0WRl1kQwrCZ9rmxxDJBQEx5rG"
         ).strip(),
