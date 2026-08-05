@@ -28,37 +28,28 @@ from shared.logging import setup_logger
 
 
 def _start_track_notify_daemon(logger) -> None:
-    """Mon/Wed 00:00 轨迹查询，挂在主进程后台线程，不另起容器。"""
-    import importlib.util
+    """Mon/Wed 00:00 轨迹查询：子进程跑，避免与 logistics_bot 的 settings 模块名冲突。"""
+    import subprocess
 
     track_main_path = ROOT_DIR / "apps" / "track_notify" / "main.py"
     if not track_main_path.is_file():
         logger.warning("track_notify: main.py missing, scheduler disabled")
         return
-    spec = importlib.util.spec_from_file_location("track_notify_main", track_main_path)
-    if not spec or not spec.loader:
-        logger.warning("track_notify: cannot load main.py, scheduler disabled")
-        return
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["track_notify_main"] = mod
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        logger.exception("track_notify: import failed, scheduler disabled")
-        return
-    run_daemon = getattr(mod, "run_daemon", None)
-    if not callable(run_daemon):
-        logger.warning("track_notify: run_daemon missing, scheduler disabled")
-        return
 
     def _target() -> None:
         try:
-            run_daemon(dry_run=False)
+            # 独立解释器：track_notify/settings.py 不会被 logistics_bot.settings 挡住
+            proc = subprocess.Popen(
+                [sys.executable, str(track_main_path), "--daemon"],
+                cwd=str(ROOT_DIR),
+            )
+            code = proc.wait()
+            logger.error("track_notify daemon exited code=%s", code)
         except Exception:
             logger.exception("track_notify daemon crashed")
 
     threading.Thread(target=_target, name="track-notify", daemon=True).start()
-    logger.info("track_notify background scheduler started (Mon/Wed 00:00 Asia/Shanghai)")
+    logger.info("track_notify subprocess scheduler started (Mon/Wed 00:00 Asia/Shanghai)")
 
 
 class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):
