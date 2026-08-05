@@ -705,7 +705,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 ops_list = [{"name": uid, "user_id": uid} for uid in config.OPERATION_USERS]
             if not ops_list:
                 self._send_text_reply(
-                    "⚠️ 未配置运营人员。请在 .env 设置 LCL_OPERATION_USERS 或 OPERATION_USERS / PINXIANG_OPS_USERS（格式：姓名:userId,...）",
+                    "⚠️ 未配置运营人员。请在 .env 设置 PINXIANG_OPS_USERS（与流程三相同，格式：姓名:userId,...）",
                     incoming_message,
                 )
                 return

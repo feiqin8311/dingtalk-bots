@@ -45,6 +45,9 @@ PACKING_HEADERS = (
     "高",
 )
 
+# 拼箱结果表仅改箱；Amazon 模板用全量（原箱+改箱），与首次模板1一致
+AMAZON_DATA_SHEET = "Amazon全量"
+
 
 @dataclass(frozen=True)
 class ProductSpec:
@@ -305,25 +308,15 @@ def compute_packing(items: Sequence[LineItem]) -> PackingResult:
     return result
 
 
-def load_packing_result_workbook(input_path: PathLike) -> PackingResult:
-    """读取物流修正后的「拼箱结果」表，用于替换当前结果并重生成 Amazon 模板。"""
-    path = Path(input_path)
-    wb = load_workbook(filename=str(path), data_only=True, read_only=True)
-    try:
-        if "拼箱结果" not in wb.sheetnames:
-            raise ValueError(f"缺少工作表：拼箱结果（现有：{', '.join(wb.sheetnames)}）")
-        ws = wb["拼箱结果"]
-        rows_raw = list(ws.iter_rows(values_only=True))
-    finally:
-        wb.close()
+def _rows_from_sheet_values(rows_raw: list) -> list[PackingRow]:
     if not rows_raw:
-        raise ValueError("拼箱结果表为空")
+        return []
     header = [_cell_str(c) for c in rows_raw[0]]
     idx = _header_index(header)
     required = ("SKU", "发货数量", "单箱数量", "箱数", "单箱毛重", "长", "宽", "高")
     missing = [h for h in required if h not in idx]
     if missing:
-        raise ValueError(f"拼箱结果缺少必要列：{', '.join(missing)}")
+        raise ValueError(f"缺少必要列：{', '.join(missing)}")
 
     rows: list[PackingRow] = []
     for raw in rows_raw[1:]:
@@ -358,17 +351,10 @@ def load_packing_result_workbook(input_path: PathLike) -> PackingResult:
                 remark="修正版",
             )
         )
-    if not rows:
-        raise ValueError("拼箱结果中没有可用的 SKU 行")
-    return PackingResult(rows=rows, all_rows=list(rows))
+    return rows
 
 
-def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path:
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "拼箱结果"
+def _write_packing_sheet(ws, rows: Sequence[PackingRow]) -> None:
     thin = Border(
         left=Side(style="thin"),
         right=Side(style="thin"),
@@ -381,12 +367,55 @@ def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path
         cell.font = Font(bold=True)
         cell.border = thin
         cell.alignment = center
-    for r_idx, row in enumerate(result.rows, start=2):
+    for r_idx, row in enumerate(rows, start=2):
         data = row.as_dict()
         for c_idx, key in enumerate(PACKING_HEADERS, start=1):
             cell = ws.cell(r_idx, c_idx, data.get(key))
             cell.border = thin
             cell.alignment = center
+
+
+def load_packing_result_workbook(input_path: PathLike) -> PackingResult:
+    """读取「拼箱结果」；若有 Amazon全量 则作 amazon_rows（与模板1一致）。"""
+    path = Path(input_path)
+    wb = load_workbook(filename=str(path), data_only=True, read_only=True)
+    try:
+        if "拼箱结果" not in wb.sheetnames:
+            raise ValueError(f"缺少工作表：拼箱结果（现有：{', '.join(wb.sheetnames)}）")
+        rows_raw = list(wb["拼箱结果"].iter_rows(values_only=True))
+        amazon_raw = None
+        if AMAZON_DATA_SHEET in wb.sheetnames:
+            amazon_raw = list(wb[AMAZON_DATA_SHEET].iter_rows(values_only=True))
+    finally:
+        wb.close()
+    rows = _rows_from_sheet_values(rows_raw)
+    if not rows and not amazon_raw:
+        raise ValueError("拼箱结果中没有可用的 SKU 行")
+    if amazon_raw:
+        all_rows = _rows_from_sheet_values(amazon_raw)
+        if not all_rows:
+            all_rows = list(rows)
+    else:
+        all_rows = list(rows)
+    if not rows and all_rows:
+        # 仅有 Amazon 全量时仍可生成模板；拼箱结果改箱为空
+        rows = []
+    if not rows and not all_rows:
+        raise ValueError("拼箱结果中没有可用的 SKU 行")
+    return PackingResult(rows=rows, all_rows=all_rows)
+
+
+def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "拼箱结果"
+    _write_packing_sheet(ws, result.rows)
+    # 模板1/2 共用全量行（原箱+改箱）；无 all_rows 时退回改箱
+    amazon_rows = list(result.amazon_rows)
+    ws_amz = wb.create_sheet(AMAZON_DATA_SHEET)
+    _write_packing_sheet(ws_amz, amazon_rows)
     if result.warnings:
         ws2 = wb.create_sheet("警告")
         ws2.append(["警告"])

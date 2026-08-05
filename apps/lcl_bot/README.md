@@ -21,7 +21,7 @@
 | 变量 | 说明 |
 |------|------|
 | `LCL_LOGISTICS_USERS` / `LOGISTICS_USERS` | 物流白名单（空=开放） |
-| `LCL_OPERATION_USERS` / `OPERATION_USERS` | 运营白名单 |
+| `PINXIANG_OPS_USERS` | 运营名单（与流程三不分仓共用） |
 | `LCL_BASE_DIR` | 默认本 app 目录 |
 | 登记表 UNC | `LCL_REGISTER_EXCEL_PATH` 等 |
 

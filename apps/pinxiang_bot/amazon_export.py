@@ -52,13 +52,7 @@ def create_amazon_workbook(
         raise ValueError(f"Amazon 模版缺少工作表: {TEMPLATE_SHEET}")
     ws = wb[TEMPLATE_SHEET]
 
-    # Default owners (rows 3-4 in MPL2)
-    for row_idx in range(1, 8):
-        label = str(ws.cell(row_idx, 1).value or "").strip()
-        if label == "Default prep owner":
-            ws.cell(row_idx, 2, default_prep_owner)
-        elif label == "Default labeling owner":
-            ws.cell(row_idx, 2, default_labeling_owner)
+    _apply_default_owners(ws, default_prep_owner, default_labeling_owner)
 
     header_row = _find_header_row(ws)
     data_row = header_row + 1
@@ -68,6 +62,66 @@ def create_amazon_workbook(
 
     wb.save(out)
     return out
+
+
+def reformat_amazon_workbook(
+    *,
+    data_source: PathLike,
+    template_source: PathLike,
+    output_path: PathLike,
+    default_prep_owner: str = "Seller",
+    default_labeling_owner: str = "Seller",
+) -> Path:
+    """把已填模板的数据行原样拷到新壳子（模板2 与模板1 数据一致，仅格式不同）。"""
+    src = Path(data_source)
+    if not src.is_file():
+        raise FileNotFoundError(f"Amazon 数据源不存在: {src}")
+    shell = Path(template_source)
+    if not shell.is_file():
+        raise FileNotFoundError(f"Amazon 模版不存在: {shell}")
+
+    src_wb = load_workbook(src, data_only=True)
+    try:
+        if TEMPLATE_SHEET not in src_wb.sheetnames:
+            raise ValueError(f"数据源缺少工作表: {TEMPLATE_SHEET}")
+        src_ws = src_wb[TEMPLATE_SHEET]
+        src_header = _find_header_row(src_ws)
+        rows: list[list] = []
+        r = src_header + 1
+        while True:
+            sku = src_ws.cell(r, 1).value
+            if sku is None or str(sku).strip() == "":
+                break
+            rows.append([src_ws.cell(r, c).value for c in range(1, 11)])
+            r += 1
+    finally:
+        src_wb.close()
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(shell, out)
+    wb = load_workbook(out)
+    if TEMPLATE_SHEET not in wb.sheetnames:
+        raise ValueError(f"Amazon 模版缺少工作表: {TEMPLATE_SHEET}")
+    ws = wb[TEMPLATE_SHEET]
+    _apply_default_owners(ws, default_prep_owner, default_labeling_owner)
+    header_row = _find_header_row(ws)
+    for i, values in enumerate(rows):
+        row_idx = header_row + 1 + i
+        for col, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col, value=value)
+            cell.border = THIN_BORDER
+    wb.save(out)
+    return out
+
+
+def _apply_default_owners(ws, prep: str, labeling: str) -> None:
+    for row_idx in range(1, 8):
+        label = str(ws.cell(row_idx, 1).value or "").strip()
+        if label == "Default prep owner":
+            ws.cell(row_idx, 2, prep)
+        elif label == "Default labeling owner":
+            ws.cell(row_idx, 2, labeling)
 
 
 def _find_header_row(ws) -> int:

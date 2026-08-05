@@ -29,7 +29,7 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 import pinxiang_config  # noqa: E402
-from amazon_export import create_amazon_workbook  # noqa: E402
+from amazon_export import create_amazon_workbook, reformat_amazon_workbook  # noqa: E402
 from amazon_packaging import fill_amazon_packaging_file, is_amazon_packaging_workbook  # noqa: E402
 from packing import (  # noqa: E402
     load_packing_result_workbook,
@@ -608,7 +608,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         await self._promote_ops_queue(ops_user_id)
 
     async def _handle_template_v2(self, user_id: str) -> None:
-        """运营或物流：按当前拼箱结果用 MPL2 模板重新生成 Amazon 文件。"""
+        """运营或物流：用 MPL2 壳子重出模板2，数据与当前模板1一致。"""
         self._cleanup_pending()
         pending_log = self._pending_logistics.get(user_id)
         pending_ops = self._pending_ops.get(user_id)
@@ -616,26 +616,26 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             packing_path = pending_log.packing_result_path
             shipment_path = pending_log.shipment_path
             merge_dir = pending_log.merge_dir
+            existing_tpl = pending_log.amazon_template_path
             target = "logistics"
         elif pending_ops is not None:
             packing_path = pending_ops.packing_result_path
             shipment_path = pending_ops.shipment_path
             merge_dir = pending_ops.merge_dir
+            existing_tpl = pending_ops.amazon_template_path
             target = "ops"
         else:
             raise MessageFormatError("当前没有进行中的拼箱任务，无法生成模板2。")
 
-        await self._send_text(user_id, "正在按当前拼箱结果生成 Amazon 模板2，请稍等…")
-        packing_result = await asyncio.get_running_loop().run_in_executor(
-            None, partial(self._load_packing_result_for_template, packing_path, shipment_path)
-        )
+        await self._send_text(user_id, "正在按当前模板1数据生成 Amazon 模板2（仅换格式），请稍等…")
         template_path = await asyncio.get_running_loop().run_in_executor(
             None,
             partial(
-                self._build_amazon_template,
+                self._build_amazon_template_v2,
                 merge_dir,
-                packing_result,
-                pinxiang_config.AMAZON_TEMPLATE_MPL2,
+                packing_path,
+                shipment_path,
+                existing_tpl,
             ),
         )
         if target == "logistics" and pending_log is not None:
@@ -664,6 +664,38 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             template_source=source,
             output_path=out_path,
             result=result,
+        )
+        return out_path
+
+    def _build_amazon_template_v2(
+        self,
+        job_dir: Path,
+        packing_path: Path,
+        shipment_path: Path,
+        existing_template: Optional[Path],
+    ) -> Path:
+        """优先从已发模板1拷数据到 MPL2；否则用拼箱 Amazon全量 / 发货单重算。"""
+        mpl2 = Path(pinxiang_config.AMAZON_TEMPLATE_MPL2)
+        if not mpl2.is_file():
+            raise MessageFormatError(f"Amazon 模板2不存在：{mpl2}")
+        out_path = Path(job_dir) / mpl2.name
+        existing = Path(existing_template) if existing_template else None
+        # 已有填好的模板1（或上次模板2）：只换壳，数据原样
+        if existing is not None and existing.is_file() and existing.resolve() != out_path.resolve():
+            reformat_amazon_workbook(
+                data_source=existing,
+                template_source=mpl2,
+                output_path=out_path,
+            )
+            return out_path
+        if existing is not None and existing.is_file() and existing.resolve() == out_path.resolve():
+            # 已是 MPL2 路径，数据已在；直接返回
+            return existing
+        packing_result = self._load_packing_result_for_template(packing_path, shipment_path)
+        create_amazon_workbook(
+            template_source=mpl2,
+            output_path=out_path,
+            result=packing_result,
         )
         return out_path
 
