@@ -70,6 +70,11 @@ class StateManager:
             'logistics_files_received': [],
             'logistics_files_expected': None,
             'customs_prev_status': None,
+            # 运营侧：一单一单 + 队列（与物流上传会话解耦）
+            'ops_active': {},   # ops_id -> job dict
+            'ops_queue': {},    # ops_id -> [job dict, ...]
+            # 物流会话阶段（与运营 status 解耦，转发后可 IDLE 接下一单）
+            'logistics_phase': 'IDLE',  # IDLE | UPLOADED | WAIT_OPS_SELECT
             'created_at': None,
             'updated_at': None
         }
@@ -90,23 +95,57 @@ class StateManager:
     def is_idle(self) -> bool:
         """检查是否处于空闲状态"""
         return self.get_status() == WorkflowState.IDLE
+
+    def logistics_phase(self) -> str:
+        return self.state.get("logistics_phase") or (
+            "IDLE" if self.is_idle() else "BUSY"
+        )
+
+    def can_logistics_upload(self) -> bool:
+        """物流是否可上传新发货单（不依赖运营是否在处理）。"""
+        phase = self.state.get("logistics_phase")
+        if phase is not None:
+            return phase == "IDLE"
+        return self.is_idle()
     
     def is_waiting_for_confirmation(self) -> bool:
         """检查是否正在等待物流确认"""
+        if self.state.get("logistics_phase") == "UPLOADED":
+            return True
         return self.get_status() == WorkflowState.LOGISTICS_UPLOADED
 
     def is_waiting_for_ops_select(self) -> bool:
         """物流已确认，等待选择要转发的运营"""
+        if self.state.get("logistics_phase") == "WAIT_OPS_SELECT":
+            return True
         return self.get_status() == WorkflowState.WAIT_OPS_SELECT
     
-    def is_waiting_for_operation(self) -> bool:
-        """检查是否正在等待运营上传"""
-        return self.get_status() == WorkflowState.LOGISTICS_CONFIRMED
+    def is_waiting_for_operation(self, ops_user_id: Optional[str] = None) -> bool:
+        """检查是否正在等待运营上传（可按运营 id 查当前单）。"""
+        if self.get_status() == WorkflowState.LOGISTICS_CONFIRMED:
+            if not ops_user_id:
+                return True
+            active = (self.state.get("ops_active") or {}).get(str(ops_user_id))
+            if active:
+                return True
+            op_ids = self.state.get("operation_user_ids") or []
+            if self.state.get("operation_user_id") == ops_user_id:
+                return True
+            return ops_user_id in op_ids
+        # 物流已释放后，仅看 ops_active
+        active_map = self.state.get("ops_active") or {}
+        if ops_user_id:
+            job = active_map.get(str(ops_user_id))
+            return bool(job and job.get("status") == "WAIT_AMAZON")
+        return any(
+            j.get("status") == "WAIT_AMAZON" for j in active_map.values() if isinstance(j, dict)
+        )
 
     def set_waiting_for_ops_select(self) -> None:
         if not self.is_waiting_for_confirmation():
             raise ValueError(f"当前状态为 {self.get_status()}，无法进入选运营")
         self.state["status"] = WorkflowState.WAIT_OPS_SELECT
+        self.state["logistics_phase"] = "WAIT_OPS_SELECT"
         self._save_state()
         print(f"✅ 状态已更新: {WorkflowState.WAIT_OPS_SELECT}")
 
@@ -134,11 +173,15 @@ class StateManager:
                                registry_code: Optional[str] = None,
                                shared_folder_path: Optional[str] = None):
         """设置物流已上传状态"""
-        if not self.is_idle():
-            raise ValueError(f"当前状态为 {self.get_status()}，无法上传新文件。请先完成当前流程。")
+        if not self.can_logistics_upload():
+            raise ValueError(
+                f"当前物流会话未结束（phase={self.state.get('logistics_phase')} status={self.get_status()}），"
+                "请先完成确认/转发或重置后再上传。"
+            )
         
         self.state.update({
             'status': WorkflowState.LOGISTICS_UPLOADED,
+            'logistics_phase': 'UPLOADED',
             'logistics_user_id': logistics_user_id,
             'logistics_file_path': logistics_file_path,
             'packing_result_path': packing_result_path,
@@ -164,15 +207,155 @@ class StateManager:
             self.state["operation_user_id"] = operation_user_ids[0]
         self._save_state()
         print(f"✅ 状态已更新: {WorkflowState.LOGISTICS_CONFIRMED}")
+
+    def snapshot_current_job(self) -> Dict[str, Any]:
+        """从当前物流会话快照一单，供运营 active/queue 使用。"""
+        return {
+            "logistics_file_path": self.state.get("logistics_file_path"),
+            "packing_result_path": self.state.get("packing_result_path"),
+            "amazon_template_path": self.state.get("amazon_template_path"),
+            "shipping_numbers": self.state.get("shipping_numbers"),
+            "logistics_user_id": self.state.get("logistics_user_id"),
+            "conversation_id": self.state.get("conversation_id"),
+            "workflow_folder_path": self.state.get("workflow_folder_path"),
+            "registry_code": self.state.get("registry_code"),
+            "shared_folder_path": self.state.get("shared_folder_path"),
+            "status": "WAIT_AMAZON",
+            "created_at": datetime.now().isoformat(),
+        }
+
+    def ops_is_busy(self, ops_id: str) -> bool:
+        active = (self.state.get("ops_active") or {}).get(str(ops_id))
+        return bool(active)
+
+    def enqueue_ops_job(self, ops_id: str, job: Dict[str, Any]) -> int:
+        """运营忙碌时入队，返回排队位次（1-based）。"""
+        ops_id = str(ops_id)
+        queue = dict(self.state.get("ops_queue") or {})
+        items = list(queue.get(ops_id) or [])
+        items.append(job)
+        queue[ops_id] = items
+        self.state["ops_queue"] = queue
+        self._save_state()
+        return len(items)
+
+    def activate_ops_job(self, ops_id: str, job: Dict[str, Any]) -> None:
+        """设为运营当前处理单，并绑定到全局字段供现有 handler 使用。"""
+        ops_id = str(ops_id)
+        job = dict(job)
+        job["status"] = job.get("status") or "WAIT_AMAZON"
+        active = dict(self.state.get("ops_active") or {})
+        active[ops_id] = job
+        self.state["ops_active"] = active
+        self.state["operation_user_id"] = ops_id
+        self.state["operation_user_ids"] = [ops_id]
+        # 注入路径，兼容 get_packing_result_path 等
+        for key in (
+            "logistics_file_path",
+            "packing_result_path",
+            "amazon_template_path",
+            "shipping_numbers",
+            "logistics_user_id",
+            "conversation_id",
+            "workflow_folder_path",
+            "registry_code",
+            "shared_folder_path",
+        ):
+            if job.get(key) is not None:
+                self.state[key] = job.get(key)
+        self.state["status"] = WorkflowState.LOGISTICS_CONFIRMED
+        self._save_state()
+
+    def release_logistics_session(self) -> None:
+        """物流转发后释放：可立刻上传下一单；保留 ops_active / ops_queue。"""
+        ops_active = dict(self.state.get("ops_active") or {})
+        ops_queue = dict(self.state.get("ops_queue") or {})
+        # 物流 phase 置 IDLE，允许下一单；运营路径字段从 active 回填一份兼容
+        self.state["logistics_phase"] = "IDLE"
+        if ops_active:
+            # 任取一个 active 填全局路径，供未改全的 get_* 兼容
+            pick_id = next(iter(ops_active.keys()))
+            job = ops_active[pick_id]
+            self.state["operation_user_id"] = pick_id
+            self.state["operation_user_ids"] = [pick_id]
+            for key in (
+                "logistics_file_path",
+                "packing_result_path",
+                "amazon_template_path",
+                "shipping_numbers",
+                "logistics_user_id",
+                "conversation_id",
+                "workflow_folder_path",
+                "registry_code",
+                "shared_folder_path",
+            ):
+                if job.get(key) is not None:
+                    self.state[key] = job.get(key)
+            self.state["status"] = WorkflowState.LOGISTICS_CONFIRMED
+        else:
+            self.state["status"] = WorkflowState.IDLE
+            self.state["operation_user_id"] = None
+            self.state["operation_user_ids"] = []
+        self.state["ops_active"] = ops_active
+        self.state["ops_queue"] = ops_queue
+        self._save_state()
+        print("✅ 物流会话已释放，运营队列保留")
+
+    def finish_ops_job_and_promote(self, ops_id: str) -> Optional[Dict[str, Any]]:
+        """结束运营当前单；若有排队则激活下一单并返回 job，否则 None。"""
+        ops_id = str(ops_id)
+        active = dict(self.state.get("ops_active") or {})
+        active.pop(ops_id, None)
+        self.state["ops_active"] = active
+        queue = dict(self.state.get("ops_queue") or {})
+        items = list(queue.get(ops_id) or [])
+        next_job = None
+        if items:
+            next_job = items.pop(0)
+            if items:
+                queue[ops_id] = items
+            else:
+                queue.pop(ops_id, None)
+        self.state["ops_queue"] = queue
+        self._save_state()
+        if next_job:
+            self.activate_ops_job(ops_id, next_job)
+            return next_job
+        # 无下一单：若其它运营也无 active，可 idle
+        if not active:
+            self.state["status"] = WorkflowState.IDLE
+            self.state["operation_user_id"] = None
+            self.state["operation_user_ids"] = []
+            self._save_state()
+        return None
+
+    def get_ops_queue_length(self, ops_id: str) -> int:
+        return len((self.state.get("ops_queue") or {}).get(str(ops_id)) or [])
+
+    def bind_ops_job_to_state(self, ops_id: str) -> bool:
+        """把指定运营的 active job 写回全局路径字段。"""
+        job = (self.state.get("ops_active") or {}).get(str(ops_id))
+        if not job:
+            return False
+        self.activate_ops_job(ops_id, job)
+        return True
     
     def set_operation_uploaded(self, operation_user_id: str, amazon_file_path: str):
         """设置运营已上传状态"""
-        if not self.is_waiting_for_operation():
+        if not self.is_waiting_for_operation(operation_user_id):
             raise ValueError(f"当前状态为 {self.get_status()}，运营暂时无法上传文件")
         
         self.state['status'] = WorkflowState.OPERATION_UPLOADED
         self.state['operation_user_id'] = operation_user_id
         self.state['amazon_file_path'] = amazon_file_path
+        # 同步 active job
+        active = dict(self.state.get("ops_active") or {})
+        job = dict(active.get(str(operation_user_id)) or {})
+        if job:
+            job["status"] = "OPERATION_UPLOADED"
+            job["amazon_file_path"] = amazon_file_path
+            active[str(operation_user_id)] = job
+            self.state["ops_active"] = active
         self._save_state()
         print(f"✅ 状态已更新: {WorkflowState.OPERATION_UPLOADED}")
 
@@ -265,10 +448,36 @@ class StateManager:
         return self.state.get('lingxing_shipment_numbers')
     
     def reset(self):
-        """重置状态为空闲"""
+        """结束当前运营单并重置；保留其他运营的 active/queue，物流可接单。"""
+        ops_active = dict(self.state.get("ops_active") or {})
+        ops_queue = dict(self.state.get("ops_queue") or {})
+        finishing = self.state.get("operation_user_id")
+        next_job = None
+        if finishing:
+            ops_active.pop(str(finishing), None)
+            items = list(ops_queue.get(str(finishing)) or [])
+            if items:
+                next_job = items.pop(0)
+                if items:
+                    ops_queue[str(finishing)] = items
+                else:
+                    ops_queue.pop(str(finishing), None)
         self.state = self._get_default_state()
-        self._save_state()
-        print(f"✅ 状态已重置: {WorkflowState.IDLE}")
+        self.state["ops_active"] = ops_active
+        self.state["ops_queue"] = ops_queue
+        self.state["logistics_phase"] = "IDLE"
+        if next_job and finishing:
+            next_job = dict(next_job)
+            next_job["needs_push"] = True
+            self.activate_ops_job(str(finishing), next_job)
+            print(f"✅ 状态重置并提升队列: ops={finishing}")
+        elif ops_active:
+            pick_id = next(iter(ops_active.keys()))
+            self.activate_ops_job(pick_id, ops_active[pick_id])
+            print(f"✅ 状态已重置(保留其他ops): active={len(ops_active)}")
+        else:
+            self._save_state()
+            print("✅ 状态已重置: IDLE")
     
     def get_logistics_user_id(self) -> Optional[str]:
         """获取物流人员ID"""
@@ -278,8 +487,12 @@ class StateManager:
         """获取运营人员ID"""
         return self.state.get('operation_user_id')
     
-    def get_packing_result_path(self) -> Optional[str]:
-        """获取拼箱结果文件路径"""
+    def get_packing_result_path(self, ops_user_id: Optional[str] = None) -> Optional[str]:
+        """获取拼箱结果文件路径（运营优先读自己的 active job）。"""
+        if ops_user_id:
+            job = (self.state.get("ops_active") or {}).get(str(ops_user_id))
+            if job and job.get("packing_result_path"):
+                return job.get("packing_result_path")
         return self.state.get('packing_result_path')
     
     def get_amazon_file_path(self) -> Optional[str]:

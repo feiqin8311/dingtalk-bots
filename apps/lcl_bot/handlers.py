@@ -442,7 +442,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             try:
                 if workflow_folder:
                     self._cleanup_workflow_files(workflow_folder)
-                self.state_manager.reset()
+                self._reset_workflow()
             except:
                 pass
 
@@ -765,8 +765,59 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self._send_text_reply(f"❌ 转发失败: {str(e)}", incoming_message)
             self._notify_tech_support(f"lcl 选择运营转发失败：{str(e)}")
 
+    def _push_lcl_ops_job_files(self, corp_user_id: str, job: dict, *, from_queue: bool = False) -> None:
+        """私聊推送拼箱结果+模板给运营（队列提升时无 stream message）。"""
+        packing_result_path = job.get("packing_result_path") or ""
+        amazon_template_path = job.get("amazon_template_path") or ""
+        if not packing_result_path or not os.path.exists(packing_result_path):
+            raise FileNotFoundError(f"拼箱结果不存在: {packing_result_path}")
+        packing_name = os.path.basename(packing_result_path)
+        head = (
+            "【分仓拼箱】排队任务开始处理。\n"
+            if from_queue
+            else "【分仓拼箱】物流已审核通过，请处理。\n"
+        )
+        self.dingtalk_api.send_text_message(
+            corp_user_id,
+            head
+            + "请下载拼箱结果与 Amazon 模板；已默认发送模板1，如需新版格式回复【模板2】。\n"
+            + "也可上传卖家后台包装信息表，机器人将自动填写并回传。\n"
+            + f"拼箱结果：{packing_name}",
+        )
+        media_id, file_name = self.dingtalk_api.upload_file(packing_result_path)
+        self.dingtalk_api.send_file_message(corp_user_id, media_id, file_name)
+        if amazon_template_path and os.path.exists(amazon_template_path):
+            t_media, t_name = self.dingtalk_api.upload_file(amazon_template_path)
+            self.dingtalk_api.send_file_message(corp_user_id, t_media, t_name)
+
+    def _reset_workflow(self, ops_user_id: Optional[str] = None) -> None:
+        """结束流程；若该运营有排队任务则自动提升并推送。"""
+        oid = ops_user_id or self.state_manager.get_operation_user_id()
+        self.state_manager.reset()
+        if oid:
+            self._after_ops_workflow_reset(str(oid))
+
+    def _after_ops_workflow_reset(self, ops_user_id: str) -> None:
+        """reset 后若提升了队列下一单，推送文件。"""
+        if not ops_user_id:
+            return
+        job = (self.state_manager.state.get("ops_active") or {}).get(str(ops_user_id))
+        if not job or not job.get("needs_push"):
+            return
+        corp = self._normalize_recipient_id(ops_user_id) or ops_user_id
+        try:
+            self._push_lcl_ops_job_files(corp, job, from_queue=True)
+            job["needs_push"] = False
+            active = dict(self.state_manager.state.get("ops_active") or {})
+            active[str(ops_user_id)] = job
+            self.state_manager.state["ops_active"] = active
+            self.state_manager._save_state()
+            self.logger.info("lcl pushed queued job to ops=%s", ops_user_id)
+        except Exception as exc:
+            self.logger.exception("lcl push queued job failed ops=%s: %s", ops_user_id, exc)
+
     async def _forward_to_selected_ops(self, incoming_message, ops: dict) -> None:
-        """将拼箱结果 + Amazon 模板发给指定运营。"""
+        """将拼箱结果 + Amazon 模板发给指定运营（忙则排队，物流立即释放）。"""
         if not self.state_manager.is_waiting_for_ops_select():
             self._send_text_reply("⚠️ 当前不在选运营阶段。", incoming_message)
             return
@@ -784,24 +835,16 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             except Exception as copy_exc:
                 self.logger.warning(f"复制拼箱结果到共享盘失败: {copy_exc}")
 
-        media_id, file_name = self._upload_stream_file(packing_result_path, incoming_message)
-
         amazon_template_path = self.state_manager.get_amazon_template_path()
-        template_media_id = None
-        template_file_name = None
-        if amazon_template_path and os.path.exists(amazon_template_path):
-            template_media_id, template_file_name = self._upload_stream_file(
-                amazon_template_path, incoming_message
-            )
-            if shared_folder_path:
-                try:
-                    shared_template_path = os.path.join(
-                        shared_folder_path, os.path.basename(amazon_template_path)
-                    )
-                    shutil.copy2(amazon_template_path, shared_template_path)
-                except Exception as copy_exc:
-                    self.logger.warning(f"复制Amazon模板到共享盘失败: {copy_exc}")
-        else:
+        if amazon_template_path and os.path.exists(amazon_template_path) and shared_folder_path:
+            try:
+                shared_template_path = os.path.join(
+                    shared_folder_path, os.path.basename(amazon_template_path)
+                )
+                shutil.copy2(amazon_template_path, shared_template_path)
+            except Exception as copy_exc:
+                self.logger.warning(f"复制Amazon模板到共享盘失败: {copy_exc}")
+        elif not amazon_template_path or not os.path.exists(amazon_template_path or ""):
             self.logger.warning("未找到Amazon发货模板文件，仅发送拼箱结果")
 
         ops_id = ops.get("user_id") or ""
@@ -811,7 +854,41 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self._send_text_reply(f"❌ 无法解析运营【{ops_name}】的 userId", incoming_message)
             return
 
+        job = self.state_manager.snapshot_current_job()
+        packing_name = os.path.basename(packing_result_path)
+
+        # 运营忙碌：入队，物流仍释放
+        if self.state_manager.ops_is_busy(ops_id):
+            pos = self.state_manager.enqueue_ops_job(ops_id, job)
+            self.state_manager.release_logistics_session()
+            self._send_text_reply(
+                f"✅ 已转发给运营【{ops_name}】（排队中）。\n"
+                f"本单排队第 {pos} 位，对方完成后会自动推送。\n"
+                f"拼箱结果：{packing_name}\n\n"
+                "您可继续上传下一单。",
+                incoming_message,
+            )
+            try:
+                self.dingtalk_api.send_text_message(
+                    corp_user_id,
+                    f"【分仓拼箱】新任务已加入队列（第 {pos} 位）。\n"
+                    f"文件：{packing_name}\n"
+                    "请先完成当前单，完成后系统会自动推送下一单。",
+                )
+            except Exception as exc:
+                self.logger.warning("notify ops queue failed: %s", exc)
+            self.logger.info("lcl queued for ops=%s(%s) pos=%s", ops_name, ops_id, pos)
+            return
+
+        # 空闲：立刻推送
         try:
+            media_id, file_name = self._upload_stream_file(packing_result_path, incoming_message)
+            template_media_id = None
+            template_file_name = None
+            if amazon_template_path and os.path.exists(amazon_template_path):
+                template_media_id, template_file_name = self._upload_stream_file(
+                    amazon_template_path, incoming_message
+                )
             self.dingtalk_api.send_file_message(corp_user_id, media_id, file_name)
             if template_media_id and template_file_name:
                 self.dingtalk_api.send_file_message(
@@ -832,9 +909,12 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         if template_media_id and template_file_name:
             self._send_excel_copy_to_others(template_media_id, template_file_name, "Amazon发货模板")
 
-        self.state_manager.set_logistics_confirmed([ops_id])
+        self.state_manager.activate_ops_job(ops_id, job)
+        self.state_manager.release_logistics_session()
         self._send_text_reply(
-            f"✅ 已转发给运营【{ops_name}】。\n已发送拼箱结果与 Amazon 模板1。",
+            f"✅ 已转发给运营【{ops_name}】。\n"
+            "已发送拼箱结果与 Amazon 模板1。\n"
+            "您可继续上传下一单。",
             incoming_message,
         )
         self.logger.info("lcl forwarded to ops=%s(%s)", ops_name, ops_id)
@@ -953,7 +1033,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             except Exception as exc:
                 self.logger.error(f"通知物流人员失败: {exc}")
         
-        self.state_manager.reset()
+        self._reset_workflow()
         self.logger.info("流程结束，状态已重置")
 
     async def _handle_shipment_numbers_input(self, incoming_message, text_content: str):
@@ -1063,7 +1143,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 f"❌ 自动化模块加载失败: {exc}\n请联系技术支持。",
                 incoming_message
             )
-            self.state_manager.reset()
+            self._reset_workflow()
             return
         
         results = list(partial_results or [])
@@ -1079,7 +1159,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 "请确认物流已上传并完成登记后再重试。",
                 incoming_message
             )
-            self.state_manager.reset()
+            self._reset_workflow()
             return
 
         logistics_no = registry_code
@@ -1121,7 +1201,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                         "⚠️ 领星需要登录，请先在浏览器中登录领星后重试。",
                         incoming_message
                     )
-                    self.state_manager.reset()
+                    self._reset_workflow()
                     return
                 
                 # 遍历处理每个发货单
@@ -1177,7 +1257,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 f"❌ 领星自动化处理失败: {exc}",
                 incoming_message
             )
-            self.state_manager.reset()
+            self._reset_workflow()
             return
         
         # 汇总结果
@@ -1230,7 +1310,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self.state_manager.set_waiting_for_logistics_files(expected_count=2)
             self.logger.info("等待物流上传发货单/报关资料Excel文件")
         else:
-            self.state_manager.reset()
+            self._reset_workflow()
             self.logger.info("领星自动化处理完成，流程结束")
 
     async def _process_customs_after_logistics_upload(self, incoming_message, shipment_numbers: list):
@@ -1410,7 +1490,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         )
         self._send_text_reply(summary, incoming_message)
 
-        self.state_manager.reset()
+        self._reset_workflow()
         self.logger.info("清关资料处理完成，流程结束")
 
     
@@ -1418,8 +1498,10 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                                      file_name: str, download_code: str):
         """处理运营人员上传的Amazon包装信息文件"""
         try:
+            # 绑定该运营 active job（物流可能已开始下一单）
+            self.state_manager.bind_ops_job_to_state(sender_id)
             # 检查状态
-            if not self.state_manager.is_waiting_for_operation():
+            if not self.state_manager.is_waiting_for_operation(sender_id):
                 self._send_text_reply(
                     "⚠️  当前没有待处理的流程\n\n"
                     "请等待物流人员上传发货单并确认后，再上传Amazon包装信息文件。",
@@ -1446,8 +1528,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 robot_code=robot_code
             )
             
-            # 2. 获取拼箱结果
-            packing_result_path = self.state_manager.get_packing_result_path()
+            # 2. 获取拼箱结果（优先该运营 active job）
+            packing_result_path = self.state_manager.get_packing_result_path(sender_id)
             
             if not os.path.exists(packing_result_path):
                 raise FileNotFoundError(f"拼箱结果文件不存在: {packing_result_path}")
@@ -1847,7 +1929,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         
         # 执行重置
         self._cleanup_workflow_files()
-        self.state_manager.reset()
+        self._reset_workflow()
         
         self._send_text_reply(
             "✅ 状态已重置，可以开始新的流程\n"
