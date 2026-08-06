@@ -50,7 +50,10 @@ SMB_PORT = int((os.getenv("SMB_PORT") or os.getenv("PINXIANG_SMB_PORT") or "445"
 SMB_TIMEOUT_SEC = int((os.getenv("SMB_TIMEOUT_SEC") or "30").strip())
 SMB_CLIENT_NAME = os.getenv("SMB_CLIENT_NAME", "dingtalk-pinxiang-bot").strip()
 
-PENDING_TTL_SEC = int((os.getenv("PINXIANG_PENDING_TTL_SEC") or "600").strip())
+# 物流待确认/选运营：短 TTL
+PENDING_TTL_SEC = int((os.getenv("PINXIANG_PENDING_TTL_SEC") or "3600").strip())
+# 运营当前单 + 排队：长 TTL（容器重启后仍可恢复）
+OPS_PENDING_TTL_SEC = int((os.getenv("PINXIANG_OPS_PENDING_TTL_SEC") or "604800").strip())  # 7d
 
 # Amazon Manifest 模板（与 dingtalk-lcl-bot/Template_Files 一致）
 _TEMPLATES_DIR = APP_DIR / "templates"

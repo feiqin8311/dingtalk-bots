@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""将拼箱结果写入 Amazon Manifest 上传模版（MPL2）。
+"""将拼箱结果写入 Amazon Manifest 上传模版。
 
-模版结构与 dingtalk-lcl-bot 一致，本模块独立复制逻辑，不 import 外部项目。
+规则（流程三）：
+- 不拼箱（原箱 / 原箱-整数部分）：填 Units per box / 箱数 / 尺寸 / 重量
+- 拼箱（改箱/合箱/余数等）：只填 Merchant SKU + Quantity；同 SKU 合并数量，不写尺寸
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ THIN_BORDER = Border(
 
 TEMPLATE_SHEET = "Create workflow – template"
 
+# 视为原厂包装（不拼箱）的 remark
+_ORIGINAL_CASE_REMARKS = frozenset({"原箱", "原箱-整数部分"})
+
 
 def create_amazon_workbook(
     *,
@@ -56,8 +61,8 @@ def create_amazon_workbook(
 
     header_row = _find_header_row(ws)
     data_row = header_row + 1
-    for row in result.amazon_rows:
-        _write_data_row(ws, data_row, row)
+    for row, with_case_pack in _manifest_rows(result.amazon_rows):
+        _write_data_row(ws, data_row, row, with_case_pack=with_case_pack)
         data_row += 1
 
     wb.save(out)
@@ -131,20 +136,112 @@ def _find_header_row(ws) -> int:
     return 8
 
 
-def _write_data_row(ws, row_idx: int, row: PackingRow) -> None:
+def _is_mixed_packing_row(row: PackingRow) -> bool:
+    """True = 拼箱（不写尺寸、同 SKU 合并）；False = 不拼箱原厂包装。"""
+    remark = (row.remark or "").strip()
+    if remark in _ORIGINAL_CASE_REMARKS:
+        return False
+    if remark and remark not in {"修正版"}:
+        # 改箱 / 合箱 / 借箱 / 余数 / 整票拼1箱 等
+        return True
+    # 无 remark 或修正版：有合箱组、或「整行一箱」形态视为拼箱
+    if (row.box_group_id or "").strip():
+        return True
+    if (
+        row.qty > 0
+        and abs(row.units_per_box - row.qty) < 1e-9
+        and abs(row.box_count - 1.0) < 1e-9
+    ):
+        return True
+    return False
+
+
+def _sku_key(row: PackingRow) -> str:
+    return str(row.msku or row.sku or "").strip()
+
+
+def _manifest_rows(rows: list[PackingRow]) -> list[tuple[PackingRow, bool]]:
+    """生成写入模板的行：(row, with_case_pack)。拼箱同 SKU 合并 qty。"""
+    originals: list[PackingRow] = []
+    mixed_order: list[str] = []
+    mixed_qty: dict[str, float] = {}
+    mixed_sample: dict[str, PackingRow] = {}
+
+    for row in rows:
+        key = _sku_key(row)
+        if not key:
+            continue
+        if _is_mixed_packing_row(row):
+            if key not in mixed_qty:
+                mixed_order.append(key)
+                mixed_sample[key] = row
+                mixed_qty[key] = float(row.qty)
+            else:
+                mixed_qty[key] += float(row.qty)
+        else:
+            originals.append(row)
+
+    out: list[tuple[PackingRow, bool]] = []
+    for row in originals:
+        out.append((row, True))
+    for key in mixed_order:
+        sample = mixed_sample[key]
+        qty = mixed_qty[key]
+        merged = PackingRow(
+            warehouse=sample.warehouse,
+            sku=sample.sku,
+            msku=sample.msku or sample.sku,
+            qty=qty,
+            units_per_box=0.0,
+            box_count=0.0,
+            box_weight_kg=0.0,
+            length_cm=0.0,
+            width_cm=0.0,
+            height_cm=0.0,
+            remark=sample.remark or "拼箱合并",
+            box_group_id="",
+        )
+        out.append((merged, False))
+    return out
+
+
+def _num_cell(value: float):
+    if value is None:
+        return ""
+    if abs(value - round(value)) < 1e-9:
+        return int(round(value))
+    return value
+
+
+def _write_data_row(ws, row_idx: int, row: PackingRow, *, with_case_pack: bool) -> None:
     msku = row.msku or row.sku
-    values = [
-        msku,
-        int(round(row.qty)) if abs(row.qty - round(row.qty)) < 1e-9 else row.qty,
-        "",  # Expiration date
-        "",  # Manufacturing lot code
-        int(round(row.units_per_box)) if abs(row.units_per_box - round(row.units_per_box)) < 1e-9 else row.units_per_box,
-        int(round(row.box_count)) if abs(row.box_count - round(row.box_count)) < 1e-9 else row.box_count,
-        round(row.length_cm * CM_TO_INCH, 2) if row.length_cm else "",
-        round(row.width_cm * CM_TO_INCH, 2) if row.width_cm else "",
-        round(row.height_cm * CM_TO_INCH, 2) if row.height_cm else "",
-        round(row.box_weight_kg * KG_TO_LB, 2) if row.box_weight_kg else "",
-    ]
+    if with_case_pack:
+        values = [
+            msku,
+            _num_cell(row.qty),
+            "",  # Expiration date
+            "",  # Manufacturing lot code
+            _num_cell(row.units_per_box),
+            _num_cell(row.box_count),
+            round(row.length_cm * CM_TO_INCH, 2) if row.length_cm else "",
+            round(row.width_cm * CM_TO_INCH, 2) if row.width_cm else "",
+            round(row.height_cm * CM_TO_INCH, 2) if row.height_cm else "",
+            round(row.box_weight_kg * KG_TO_LB, 2) if row.box_weight_kg else "",
+        ]
+    else:
+        # 拼箱：仅 SKU + 数量，尺寸/箱规留空
+        values = [
+            msku,
+            _num_cell(row.qty),
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
     for col, value in enumerate(values, start=1):
         cell = ws.cell(row=row_idx, column=col, value=value)
         cell.border = THIN_BORDER

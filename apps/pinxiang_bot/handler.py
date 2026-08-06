@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import json
 import logging
 import sys
@@ -110,6 +111,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         self._pending_ttl_seconds = int(
             getattr(config, "pinxiang_pending_ttl_sec", pinxiang_config.PENDING_TTL_SEC)
         )
+        self._ops_pending_ttl_seconds = int(
+            getattr(config, "pinxiang_ops_pending_ttl_sec", pinxiang_config.OPS_PENDING_TTL_SEC)
+        )
         self._pending_logistics: dict[str, PendingLogistics] = {}
         self._pending_ops: dict[str, PendingOpsJob] = {}
         # 运营队列：忙碌时入队，做完一单自动推下一单；物流转发后立即释放
@@ -140,20 +144,23 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         self._cleanup_pending()
         has_files = bool(collect_download_codes(raw_payload))
 
-        if has_files and user_id in self._pending_ops:
-            await self._handle_ops_amazon_upload(incoming_message, user_id, raw_payload)
-            return
-
         if not has_files:
             if await self._handle_text_commands(user_id, message_text):
                 return
             if user_id in self._pending_ops:
                 raise MessageFormatError(
-                    "请上传亚马逊「包装箱包装信息」Excel（.xlsx）。\n回复【取消】可放弃当前任务。"
+                    "请上传亚马逊「包装箱包装信息」Excel，或上传拼箱结果表更新数据。\n"
+                    "回复【取消】可放弃当前任务。"
+                )
+            if self._is_ops_user(user_id):
+                raise MessageFormatError(
+                    "运营可直接上传拼箱结果 Excel（含「拼箱结果」表）开始任务；\n"
+                    "也可等物流转发后再上传装箱表。\n"
+                    "回复【取消】清空本地状态。"
                 )
             raise MessageFormatError(
                 "请上传发货单 Excel（.xlsx）。\n"
-                "拼箱结果出来后：回复【确认】并选择运营转发；运营上传装箱表后机器人填写回传。"
+                "拼箱结果出来后：回复【确认】并选择运营转发；运营也可直接上传拼箱结果。"
             )
 
         download_codes = collect_download_codes(raw_payload)
@@ -173,14 +180,25 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 await self._fill_and_reply_amazon(user_id, downloaded)
                 return
             raise MessageFormatError(
-                "这是亚马逊装箱表。请先由物流完成拼箱并转发任务后，再由运营上传此文件。"
+                "这是亚马逊装箱表。请先有拼箱任务（物流转发，或运营自行上传拼箱结果）后再上传此文件。"
             )
 
-        pending = self._pending_logistics.get(user_id)
-        if pending is not None and pending.stage in {"confirm", "select_ops"}:
-            if self._looks_like_packing_result(downloaded.path):
+        if self._looks_like_packing_result(downloaded.path):
+            pending = self._pending_logistics.get(user_id)
+            if pending is not None and pending.stage in {"confirm", "select_ops"}:
                 await self._handle_modified_packing_result(user_id, downloaded, pending)
                 return
+            if self._is_ops_user(user_id):
+                await self._handle_ops_packing_upload(user_id, downloaded, incoming_message)
+                return
+            raise MessageFormatError(
+                "这是拼箱结果表。物流请先上传发货单；运营可直接上传拼箱结果开始任务。"
+            )
+
+        if user_id in self._pending_ops:
+            raise MessageFormatError(
+                "当前运营任务请上传亚马逊「包装箱包装信息」Excel，或上传拼箱结果表更新数据。"
+            )
 
         await self._handle_shipment_upload(user_id, downloaded, incoming_message)
 
@@ -438,9 +456,40 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         template_path = await self._ensure_template_for_pending(pending)
         job = self._job_from_logistics(logistics_user_id, pending, template_path)
 
+        forward_keys = self._job_shipment_keys(job)
         existing = self._pending_ops.get(ops_id)
+
+        # 与运营已有数据重复：以运营为准，不覆盖 active、不重复入队
+        if existing is not None and self._jobs_overlap(forward_keys, self._job_shipment_keys(existing)):
+            with self._pending_lock:
+                self._pending_logistics.pop(logistics_user_id, None)
+                self._save_pending_state_unlocked()
+            # 仍清理队列里同单旧物流任务
+            self._drop_queue_jobs_overlapping(ops_id, forward_keys)
+            await self._send_text(
+                logistics_user_id,
+                f"运营【{ops_name}】已有本单拼箱数据（以运营上传为准），未重复转发。\n"
+                f"拼箱结果：{existing.packing_result_path.name if existing.packing_result_path else packing_name}\n\n"
+                "您可继续处理下一单。",
+            )
+            await self._send_text(
+                ops_id,
+                f"【不分仓拼箱】物流再次转发本单，已忽略（保留您当前/已上传的拼箱数据）。\n"
+                f"物流文件：{packing_name}",
+            )
+            self.logger.info(
+                "pinxiang skip duplicate forward ops=%s packing=%s (ops data wins)",
+                ops_id,
+                packing_name,
+            )
+            return
+
+        # 队列中已有同单：去掉旧的再决定是否入队
+        if forward_keys:
+            self._drop_queue_jobs_overlapping(ops_id, forward_keys)
+
         if existing is not None:
-            # 运营忙碌：入队，物流立即释放可接下一单
+            # 运营忙碌且非同单：入队，物流立即释放可接下一单
             with self._pending_lock:
                 q = self._ops_queue.setdefault(ops_id, [])
                 q.append(job)
@@ -536,23 +585,171 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             next_job.packing_result_path.name,
         )
 
-    async def _handle_ops_amazon_upload(self, incoming_message, user_id: str, raw_payload: dict) -> None:
-        download_codes = collect_download_codes(raw_payload)
-        file_names = collect_file_names_by_download_code(raw_payload)
-        downloaded = await asyncio.get_running_loop().run_in_executor(
-            None,
-            self._download_excel,
-            download_codes,
-            incoming_message.message_id,
-            file_names,
+    def _is_ops_user(self, user_id: str) -> bool:
+        if not user_id:
+            return False
+        return any(o.get("user_id") == user_id for o in self.ops_users)
+
+    @staticmethod
+    def _shipment_keys_from_text(*parts: object) -> frozenset[str]:
+        keys: set[str] = set()
+        for part in parts:
+            if part is None:
+                continue
+            for m in re.finditer(r"\bSP[0-9A-Za-z]+\b", str(part), flags=re.IGNORECASE):
+                keys.add(m.group(0).upper())
+        return frozenset(keys)
+
+    def _job_shipment_keys(self, job: PendingOpsJob) -> frozenset[str]:
+        names = []
+        if job.packing_result_path:
+            names.append(job.packing_result_path.name)
+            names.append(job.packing_result_path.stem)
+        if job.shipment_path:
+            names.append(Path(job.shipment_path).name)
+        return self._shipment_keys_from_text(*names)
+
+    def _result_shipment_keys(self, result, packing_name: str = "") -> frozenset[str]:
+        sns = list(getattr(result, "shipment_sns", None) or [])
+        return self._shipment_keys_from_text(*sns, packing_name)
+
+    def _jobs_overlap(self, a: frozenset[str], b: frozenset[str]) -> bool:
+        if not a or not b:
+            return False
+        return bool(a & b)
+
+    def _drop_queue_jobs_overlapping(self, ops_id: str, keys: frozenset[str]) -> list[str]:
+        """Remove queued logistics jobs that share shipment keys with ops data. Returns dropped labels."""
+        if not keys:
+            return []
+        dropped: list[str] = []
+        with self._pending_lock:
+            q = list(self._ops_queue.get(ops_id) or [])
+            kept: list[PendingOpsJob] = []
+            for job in q:
+                if self._jobs_overlap(keys, self._job_shipment_keys(job)):
+                    dropped.append(job.packing_result_path.name if job.packing_result_path else "queued")
+                else:
+                    kept.append(job)
+            if kept:
+                self._ops_queue[ops_id] = kept
+            else:
+                self._ops_queue.pop(ops_id, None)
+            if dropped:
+                self._save_pending_state_unlocked()
+        return dropped
+
+    async def _handle_ops_packing_upload(
+        self, user_id: str, uploaded: DownloadedFile, incoming_message
+    ) -> None:
+        """运营直接上传拼箱结果：无物流转发也可建单；有进行中任务则替换拼箱数据。"""
+        await self._send_text(user_id, "已收到拼箱数据，正在登记…")
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, partial(load_packing_result_workbook, uploaded.path)
         )
-        if downloaded is None:
-            raise MessageFormatError("未识别到 Excel 文件。")
-        if not is_amazon_packaging_workbook(downloaded.path):
-            raise MessageFormatError(
-                "请上传含「包装箱包装信息」工作表的亚马逊装箱 Excel（不是发货单、也不是 Manifest 模版）。"
+        job_dir = self.workspace / f"ops-manual-{user_id}-{incoming_message.message_id or time.time_ns()}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        packing_name = f"{result.result_basename(fallback=Path(uploaded.file_name).stem)}.xlsx"
+        packing_path = job_dir / packing_name
+        await asyncio.get_running_loop().run_in_executor(
+            None, partial(write_packing_workbook, result, packing_path)
+        )
+        amazon_template_path = await asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(self._build_amazon_template, job_dir, result, pinxiang_config.AMAZON_TEMPLATE_MPL),
+        )
+
+        keys = self._result_shipment_keys(result, packing_name)
+        dropped = self._drop_queue_jobs_overlapping(user_id, keys)
+        drop_note = ""
+        if dropped:
+            drop_note = f"\n已丢弃队列中与本单重复的物流转发：{', '.join(dropped)}（以您上传为准）。"
+
+        existing = self._pending_ops.get(user_id)
+        if existing is not None:
+            # 运营上传优先：覆盖当前单（含物流转发的同单）
+            existing.packing_result_path = packing_path
+            existing.merge_dir = job_dir
+            existing.shipment_path = packing_path
+            existing.amazon_template_path = amazon_template_path if amazon_template_path else None
+            existing.logistics_name_hint = existing.logistics_name_hint or "运营自助"
+            if result.logistics_channel:
+                existing.logistics_channel = result.logistics_channel
+            if result.store_name:
+                existing.store_name = result.store_name
+            if result.country:
+                existing.country = result.country
+            existing.updated_at = time.time()
+            self._persist_pending_state()
+            await self._send_file(
+                user_id,
+                packing_name,
+                packing_path.read_bytes(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-        await self._fill_and_reply_amazon(user_id, downloaded)
+            if amazon_template_path and Path(amazon_template_path).is_file():
+                tpl = Path(amazon_template_path)
+                await self._send_file(
+                    user_id,
+                    tpl.name,
+                    tpl.read_bytes(),
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            await self._send_text(
+                user_id,
+                "✅ 已用您上传的拼箱数据更新当前任务，并重新生成 Amazon 模板1。\n"
+                "与物流转发重复时以您上传为准。"
+                f"{drop_note}\n"
+                "可继续上传「包装箱包装信息」装箱表，或回复【模板2】。\n"
+                "回复【取消】放弃当前任务。",
+            )
+            return
+
+        job = PendingOpsJob(
+            logistics_user_id="",
+            logistics_name_hint="运营自助",
+            packing_result_path=packing_path,
+            merge_dir=job_dir,
+            shipment_path=packing_path,
+            updated_at=time.time(),
+            logistics_channel=result.logistics_channel or "",
+            store_name=result.store_name or "",
+            country=result.country or "",
+            amazon_template_path=amazon_template_path if amazon_template_path else None,
+        )
+        with self._pending_lock:
+            self._pending_ops[user_id] = job
+            self._save_pending_state_unlocked()
+        await self._send_text(
+            user_id,
+            "【不分仓拼箱】已登记您上传的拼箱数据（无需物流转发）。\n"
+            "请下载核对；已默认生成模板1，如需新版格式回复【模板2】。\n"
+            "上传卖家后台「包装箱包装信息」表后，机器人将自动填写并回传。"
+            f"{drop_note}\n"
+            f"物流渠道：{job.logistics_channel or ''}\n"
+            f"店铺：{job.store_name or ''}\n"
+            f"国家：{job.country or ''}\n"
+            f"拼箱结果：{packing_name}",
+        )
+        await self._send_file(
+            user_id,
+            packing_name,
+            packing_path.read_bytes(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        if amazon_template_path and Path(amazon_template_path).is_file():
+            tpl = Path(amazon_template_path)
+            await self._send_file(
+                user_id,
+                tpl.name,
+                tpl.read_bytes(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        self.logger.info(
+            "pinxiang ops manual packing ops=%s packing=%s",
+            user_id,
+            packing_name,
+        )
 
     async def _fill_and_reply_amazon(self, ops_user_id: str, amazon_file: DownloadedFile) -> None:
         job = self._pending_ops.get(ops_user_id)
@@ -779,23 +976,31 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         return None
 
     def _cleanup_pending(self) -> None:
-        cutoff = time.time() - self._pending_ttl_seconds
+        logistics_cutoff = time.time() - self._pending_ttl_seconds
+        ops_cutoff = time.time() - self._ops_pending_ttl_seconds
         with self._pending_lock:
             before_l = len(self._pending_logistics)
             before_o = len(self._pending_ops)
             before_q = sum(len(v) for v in self._ops_queue.values())
             self._pending_logistics = {
-                k: v for k, v in self._pending_logistics.items() if v.updated_at >= cutoff
+                k: v for k, v in self._pending_logistics.items() if v.updated_at >= logistics_cutoff
             }
-            self._pending_ops = {k: v for k, v in self._pending_ops.items() if v.updated_at >= cutoff}
+            # 运营 active/queue：长 TTL；文件仍在才保留
+            self._pending_ops = {
+                k: v
+                for k, v in self._pending_ops.items()
+                if v.updated_at >= ops_cutoff
+                and v.packing_result_path.is_file()
+                and (not v.shipment_path or v.shipment_path.is_file())
+            }
             cleaned_q: dict[str, list[PendingOpsJob]] = {}
             for oid, jobs in self._ops_queue.items():
                 kept = [
                     j
                     for j in jobs
-                    if j.updated_at >= cutoff
+                    if j.updated_at >= ops_cutoff
                     and j.packing_result_path.is_file()
-                    and j.shipment_path.is_file()
+                    and (not j.shipment_path or j.shipment_path.is_file())
                 ]
                 if kept:
                     cleaned_q[oid] = kept
@@ -866,13 +1071,14 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             raw = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 return
-            cutoff = time.time() - self._pending_ttl_seconds
+            logistics_cutoff = time.time() - self._pending_ttl_seconds
+            ops_cutoff = time.time() - self._ops_pending_ttl_seconds
             logistics: dict[str, PendingLogistics] = {}
             for uid, item in (raw.get("logistics") or {}).items():
                 if not uid or not isinstance(item, dict):
                     continue
                 pending = self._logistics_from_dict(item)
-                if pending is None or pending.updated_at < cutoff:
+                if pending is None or pending.updated_at < logistics_cutoff:
                     continue
                 if not pending.packing_result_path.is_file() or not pending.shipment_path.is_file():
                     continue
@@ -882,10 +1088,13 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 if not uid or not isinstance(item, dict):
                     continue
                 job = self._ops_from_dict(item)
-                if job is None or job.updated_at < cutoff:
+                if job is None or job.updated_at < ops_cutoff:
                     continue
-                if not job.packing_result_path.is_file() or not job.shipment_path.is_file():
+                if not job.packing_result_path.is_file():
                     continue
+                # shipment 可与 packing 同文件（运营自助）；缺失则用 packing 兜底
+                if not job.shipment_path.is_file():
+                    job.shipment_path = job.packing_result_path
                 ops[str(uid)] = job
             ops_queue: dict[str, list[PendingOpsJob]] = {}
             for uid, items in (raw.get("ops_queue") or {}).items():
@@ -896,10 +1105,12 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                     if not isinstance(item, dict):
                         continue
                     job = self._ops_from_dict(item)
-                    if job is None or job.updated_at < cutoff:
+                    if job is None or job.updated_at < ops_cutoff:
                         continue
-                    if not job.packing_result_path.is_file() or not job.shipment_path.is_file():
+                    if not job.packing_result_path.is_file():
                         continue
+                    if not job.shipment_path.is_file():
+                        job.shipment_path = job.packing_result_path
                     kept.append(job)
                 if kept:
                     ops_queue[str(uid)] = kept
@@ -908,10 +1119,11 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             self._ops_queue = ops_queue
             if logistics or ops or ops_queue:
                 self.logger.info(
-                    "pinxiang loaded pending state: logistics=%s ops=%s queue=%s",
+                    "pinxiang loaded pending state: logistics=%s ops=%s queue=%s (ops_ttl=%ss)",
                     len(logistics),
                     len(ops),
                     sum(len(v) for v in ops_queue.values()),
+                    self._ops_pending_ttl_seconds,
                 )
         except Exception as exc:
             self.logger.warning("load pinxiang pending state failed: %s", exc)

@@ -297,11 +297,11 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 )
                 return
             
-            # 特殊场景：同一人兼任物流与运营
+            # 物流兼任运营：有运营 active 任务时走运营通道；否则仍按物流上传
             if (user_role == 'logistics'
-                and self.state_manager.is_waiting_for_operation()
-                and self._is_same_user(self.state_manager.get_logistics_user_id(), incoming_message)):
-                self.logger.info("检测到物流账号兼任运营，直接进入运营文件处理流程")
+                and self._is_operation_or_dual(incoming_message, user_role)
+                and self.state_manager.is_waiting_for_operation(sender_id)):
+                self.logger.info("检测到物流账号兼任运营且有运营任务，进入运营文件处理流程")
                 await self._handle_operation_file(
                     incoming_message, sender_id,
                     file_name, download_code
@@ -856,6 +856,37 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
 
         job = self.state_manager.snapshot_current_job()
         packing_name = os.path.basename(packing_result_path)
+        forward_keys = self.state_manager.shipment_keys_from_job(job)
+        active = (self.state_manager.state.get("ops_active") or {}).get(str(ops_id))
+
+        # 与运营当前单重复：以运营数据为准，不覆盖、不入队
+        if active and self.state_manager.shipment_keys_overlap(
+            forward_keys, self.state_manager.shipment_keys_from_job(active)
+        ):
+            self.state_manager.drop_queue_jobs_overlapping(ops_id, forward_keys)
+            self.state_manager.release_logistics_session()
+            active_name = os.path.basename(active.get("packing_result_path") or packing_name)
+            self._send_text_reply(
+                f"✅ 运营【{ops_name}】已有本单拼箱数据（以运营上传为准），未重复转发。\n"
+                f"运营当前：{active_name}\n"
+                f"物流文件：{packing_name}\n\n"
+                "您可继续上传下一单。",
+                incoming_message,
+            )
+            try:
+                self.dingtalk_api.send_text_message(
+                    corp_user_id,
+                    f"【分仓拼箱】物流再次转发本单，已忽略（保留您当前/已上传的拼箱数据）。\n"
+                    f"物流文件：{packing_name}",
+                )
+            except Exception as exc:
+                self.logger.warning("notify ops skip-dup forward failed: %s", exc)
+            self.logger.info("lcl skip duplicate forward ops=%s packing=%s", ops_id, packing_name)
+            return
+
+        # 队列里同单先清掉
+        if forward_keys:
+            self.state_manager.drop_queue_jobs_overlapping(ops_id, forward_keys)
 
         # 运营忙碌：入队，物流仍释放
         if self.state_manager.ops_is_busy(ops_id):
@@ -1494,17 +1525,124 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         self.logger.info("清关资料处理完成，流程结束")
 
     
+    def _looks_like_lcl_packing_result(self, file_path: str) -> bool:
+        try:
+            xl = pd.ExcelFile(file_path)
+            return "拼箱计算结果" in xl.sheet_names
+        except Exception:
+            return False
+
+    async def _handle_ops_manual_packing_upload(
+        self, incoming_message, sender_id: str, packing_file_path: str
+    ) -> None:
+        """运营直接上传拼箱计算结果：无物流转发也可建单；有任务则更新数据。"""
+        try:
+            self._send_text_reply("📥 收到拼箱数据，正在校验并生成 Amazon 模板…", incoming_message)
+            result_path, template_path = self._apply_modified_packing_result(packing_file_path)
+
+            media_id, uploaded_file_name = self._upload_stream_file(result_path, incoming_message)
+            self.dingtalk_api.send_file_message(
+                sender_id, media_id, uploaded_file_name, webhook=incoming_message.session_webhook
+            )
+            template_media_id, template_file_name = self._upload_stream_file(template_path, incoming_message)
+            self.dingtalk_api.send_file_message(
+                sender_id, template_media_id, template_file_name, webhook=incoming_message.session_webhook
+            )
+
+            sns_from_name = re.findall(r"\bSP[0-9A-Za-z]+\b", os.path.basename(result_path), flags=re.I)
+            shipping_numbers = list(self.state_manager.get_shipping_numbers() or [])
+            for sn in sns_from_name:
+                u = sn.upper()
+                if u not in {str(x).upper() for x in shipping_numbers}:
+                    shipping_numbers.append(u)
+            job = {
+                "logistics_file_path": None,
+                "packing_result_path": result_path,
+                "amazon_template_path": template_path,
+                "shipping_numbers": shipping_numbers,
+                "logistics_user_id": self.state_manager.get_logistics_user_id() or "",
+                "conversation_id": getattr(incoming_message, "conversation_id", None),
+                "workflow_folder_path": self.state_manager.get_workflow_folder_path(),
+                "registry_code": self.state_manager.get_full_state().get("registry_code"),
+                "shared_folder_path": self.state_manager.get_full_state().get("shared_folder_path"),
+                "status": "WAIT_AMAZON",
+                "source": "ops_manual",
+            }
+            keys = self.state_manager.shipment_keys_from_job(job)
+            dropped = self.state_manager.drop_queue_jobs_overlapping(str(sender_id), keys)
+            drop_note = ""
+            if dropped:
+                drop_note = f"\n已丢弃队列中与本单重复的物流转发：{', '.join(dropped)}（以您上传为准）。"
+
+            # 有进行中任务则更新路径（运营优先覆盖物流转发）；否则新建 active
+            existing = (self.state_manager.state.get("ops_active") or {}).get(str(sender_id))
+            if existing:
+                existing = dict(existing)
+                existing["packing_result_path"] = result_path
+                existing["amazon_template_path"] = template_path
+                existing["workflow_folder_path"] = job["workflow_folder_path"]
+                existing["shipping_numbers"] = shipping_numbers or existing.get("shipping_numbers") or []
+                existing["status"] = "WAIT_AMAZON"
+                existing["source"] = "ops_manual"
+                self.state_manager.activate_ops_job(str(sender_id), existing)
+                self._send_text_reply(
+                    "✅ 已用您上传的拼箱数据更新当前任务，并重新生成 Amazon 模板。\n"
+                    "与物流转发重复时以您上传为准。"
+                    f"{drop_note}\n"
+                    "可继续上传 Amazon「包装箱包装信息」文件，或回复【模板2】。",
+                    incoming_message,
+                )
+            else:
+                self.state_manager.activate_ops_job(str(sender_id), job)
+                self._send_text_reply(
+                    "【分仓拼箱】已登记您上传的拼箱数据（无需物流转发）。\n"
+                    "已发送拼箱结果与 Amazon 模板1；如需新版格式回复【模板2】。\n"
+                    "上传卖家后台包装信息表后，机器人将自动填写并回传。"
+                    f"{drop_note}",
+                    incoming_message,
+                )
+            self.logger.info("lcl ops manual packing ops=%s packing=%s", sender_id, result_path)
+        except Exception as e:
+            self.logger.error(f"运营自助拼箱上传失败: {e}", exc_info=True)
+            self._send_text_reply(
+                f"❌ 拼箱数据校验失败：{e}\n"
+                "请确认文件含「拼箱计算结果」表及必要列后重试。",
+                incoming_message,
+            )
+
     async def _handle_operation_file(self, incoming_message, sender_id: str,
                                      file_name: str, download_code: str):
-        """处理运营人员上传的Amazon包装信息文件"""
+        """处理运营人员上传：拼箱结果(自助) 或 Amazon包装信息"""
         try:
+            workflow_folder = self.state_manager.get_workflow_folder_path()
+            if not workflow_folder or not os.path.isdir(workflow_folder):
+                self.logger.warning("找不到现有流程文件夹，自动创建新的存储目录")
+                workflow_folder = self._create_workflow_folder()
+                self.state_manager.update_workflow_folder_path(workflow_folder)
+
+            robot_code = incoming_message.robot_code
+            file_info = incoming_message.extensions.get('content', {}) if hasattr(incoming_message, 'extensions') else None
+            downloaded_path = self.dingtalk_api.download_file(
+                download_code, file_name, workflow_folder,
+                file_info=file_info,
+                robot_code=robot_code
+            )
+
+            # 运营直接上传拼箱计算结果
+            if self._looks_like_lcl_packing_result(downloaded_path):
+                await self._handle_ops_manual_packing_upload(
+                    incoming_message, sender_id, downloaded_path
+                )
+                return
+
             # 绑定该运营 active job（物流可能已开始下一单）
             self.state_manager.bind_ops_job_to_state(sender_id)
             # 检查状态
             if not self.state_manager.is_waiting_for_operation(sender_id):
                 self._send_text_reply(
                     "⚠️  当前没有待处理的流程\n\n"
-                    "请等待物流人员上传发货单并确认后，再上传Amazon包装信息文件。",
+                    "可直接上传含「拼箱计算结果」的拼箱 Excel 开始任务；\n"
+                    "或等待物流转发后再上传 Amazon 包装信息文件。",
                     incoming_message
                 )
                 return
@@ -1512,21 +1650,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             # 发送处理中提示
             self._send_text_reply("📥 收到Amazon包装信息文件，正在处理中，请稍候...", incoming_message)
             
-            workflow_folder = self.state_manager.get_workflow_folder_path()
-            if not workflow_folder or not os.path.isdir(workflow_folder):
-                self.logger.warning("找不到现有流程文件夹，自动创建新的存储目录")
-                workflow_folder = self._create_workflow_folder()
-                self.state_manager.update_workflow_folder_path(workflow_folder)
-            
-            # 1. 下载Amazon文件
-            self.logger.info("开始下载Amazon包装信息文件...")
-            robot_code = incoming_message.robot_code
-            file_info = incoming_message.extensions.get('content', {}) if hasattr(incoming_message, 'extensions') else None
-            amazon_file_path = self.dingtalk_api.download_file(
-                download_code, file_name, workflow_folder,
-                file_info=file_info,
-                robot_code=robot_code
-            )
+            amazon_file_path = downloaded_path
             
             # 2. 获取拼箱结果（优先该运营 active job）
             packing_result_path = self.state_manager.get_packing_result_path(sender_id)

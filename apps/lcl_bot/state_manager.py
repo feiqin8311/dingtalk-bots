@@ -7,6 +7,7 @@
 from datetime import datetime
 import json
 import os
+import re
 from typing import Any, Dict, Optional
 
 from . import config
@@ -227,6 +228,50 @@ class StateManager:
     def ops_is_busy(self, ops_id: str) -> bool:
         active = (self.state.get("ops_active") or {}).get(str(ops_id))
         return bool(active)
+
+    @staticmethod
+    def shipment_keys_from_job(job: Optional[Dict[str, Any]]) -> frozenset:
+        if not job:
+            return frozenset()
+        keys: set[str] = set()
+        for sn in job.get("shipping_numbers") or []:
+            if sn:
+                keys.add(str(sn).strip().upper())
+        for field in ("packing_result_path", "logistics_file_path"):
+            path = job.get(field)
+            if path:
+                for m in re.finditer(r"\bSP[0-9A-Za-z]+\b", str(path), flags=re.IGNORECASE):
+                    keys.add(m.group(0).upper())
+        return frozenset(keys)
+
+    @staticmethod
+    def shipment_keys_overlap(a, b) -> bool:
+        return bool(a and b and (set(a) & set(b)))
+
+    def drop_queue_jobs_overlapping(self, ops_id: str, keys) -> list:
+        """Drop queued jobs sharing shipment keys. Returns dropped packing basenames."""
+        keys = frozenset(keys or [])
+        if not keys:
+            return []
+        ops_id = str(ops_id)
+        queue = dict(self.state.get("ops_queue") or {})
+        items = list(queue.get(ops_id) or [])
+        kept = []
+        dropped = []
+        for job in items:
+            if self.shipment_keys_overlap(keys, self.shipment_keys_from_job(job)):
+                path = (job or {}).get("packing_result_path") or ""
+                dropped.append(os.path.basename(path) if path else "queued")
+            else:
+                kept.append(job)
+        if len(kept) != len(items):
+            if kept:
+                queue[ops_id] = kept
+            else:
+                queue.pop(ops_id, None)
+            self.state["ops_queue"] = queue
+            self._save_state()
+        return dropped
 
     def enqueue_ops_job(self, ops_id: str, job: Dict[str, Any]) -> int:
         """运营忙碌时入队，返回排队位次（1-based）。"""
