@@ -56,6 +56,7 @@ rsync -az --delete \
   --exclude '.DS_Store' \
   --exclude '**/__pycache__/' \
   --exclude '**/*.pyc' \
+  --exclude '.env' \
   --exclude '**/.env' \
   --exclude '**/.env.*' \
   --exclude '**/downloads/' \
