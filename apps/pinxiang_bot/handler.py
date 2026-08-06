@@ -704,12 +704,6 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 existing.country = result.country
             existing.updated_at = time.time()
             self._persist_pending_state()
-            await self._send_file(
-                user_id,
-                packing_name,
-                packing_path.read_bytes(),
-                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
             if amazon_template_path and Path(amazon_template_path).is_file():
                 tpl = Path(amazon_template_path)
                 await self._send_file(
@@ -746,19 +740,13 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         await self._send_text(
             user_id,
             "【不分仓拼箱】已登记您上传的拼箱数据（无需物流转发）。\n"
-            "请下载核对；已默认生成模板1，如需新版格式回复【模板2】。\n"
+            "已生成 Amazon 模板1；如需新版格式回复【模板2】。\n"
             "上传卖家后台「包装箱包装信息」表后，机器人将自动填写并回传。"
             f"{drop_note}\n"
             f"物流渠道：{job.logistics_channel or ''}\n"
             f"店铺：{job.store_name or ''}\n"
             f"国家：{job.country or ''}\n"
             f"拼箱结果：{packing_name}",
-        )
-        await self._send_file(
-            user_id,
-            packing_name,
-            packing_path.read_bytes(),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         if amazon_template_path and Path(amazon_template_path).is_file():
             tpl = Path(amazon_template_path)

@@ -210,19 +210,19 @@ def _box_dims(
     *,
     imperial: bool,
 ) -> tuple[float, float, float, float]:
-    """返回 (weight, width, length, height)；imperial=True 时为 lb/in。"""
+    """返回 (weight, width, length, height)；imperial=True 时为 lb/in。统一两位小数。"""
     if imperial:
         return (
-            round(float(weight_kg) * KG_TO_LB, 10),
-            round(float(width_cm) * CM_TO_INCH, 10),
-            round(float(length_cm) * CM_TO_INCH, 10),
-            round(float(height_cm) * CM_TO_INCH, 10),
+            round(float(weight_kg) * KG_TO_LB, 2),
+            round(float(width_cm) * CM_TO_INCH, 2),
+            round(float(length_cm) * CM_TO_INCH, 2),
+            round(float(height_cm) * CM_TO_INCH, 2),
         )
     return (
-        round(float(weight_kg), 10),
-        round(float(width_cm), 10),
-        round(float(length_cm), 10),
-        round(float(height_cm), 10),
+        round(float(weight_kg), 2),
+        round(float(width_cm), 2),
+        round(float(length_cm), 2),
+        round(float(height_cm), 2),
     )
 
 

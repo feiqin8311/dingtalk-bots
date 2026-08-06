@@ -34,9 +34,9 @@ class AmazonPackagingTests(unittest.TestCase):
         self.assertEqual(boxes[3].lines[0].units, 55)
         self.assertEqual(boxes[4].lines[0].units, 20)
         self.assertIn("801905", boxes[4].lines[0].keys)
-        # 默认美国：英制
-        self.assertAlmostEqual(boxes[0].weight_lb, 17.5 * KG_TO_LB, places=5)
-        self.assertAlmostEqual(boxes[0].length_in, 54 * CM_TO_INCH, places=5)
+        # 默认美国：英制，两位小数
+        self.assertEqual(boxes[0].weight_lb, round(17.5 * KG_TO_LB, 2))
+        self.assertEqual(boxes[0].length_in, round(54 * CM_TO_INCH, 2))
 
     def test_expand_boxes_canada_metric(self):
         rows = [
