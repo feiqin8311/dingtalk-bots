@@ -73,14 +73,15 @@ def _parse_carrier_keywords() -> tuple[str, ...]:
 
 
 def load_config_from_env() -> TrackNotifyConfig:
+    from shared.env import monorepo_env_paths
+
     load_env_files(
-        [
-            ROOT_DIR / ".env",
+        monorepo_env_paths(
+            ROOT_DIR,
             ROOT_DIR / "apps" / "track_notify" / ".env",
             ROOT_DIR / "apps" / "logistics_bot" / ".env",
             ROOT_DIR / "apps" / "cp_bot" / ".env",
-            Path.cwd() / ".env",
-        ]
+        )
     )
     token = (os.getenv("PINGYI_APP_TOKEN") or "").strip()
     key = (os.getenv("PINGYI_APP_KEY") or "").strip()

@@ -23,15 +23,15 @@ if str(ROOT_DIR) not in sys.path:
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from shared.env import load_env_files  # noqa: E402
+from shared.env import load_env_files, monorepo_env_paths  # noqa: E402
+
 
 load_env_files(
-    [
-        ROOT_DIR / ".env",
+    monorepo_env_paths(
+        ROOT_DIR,
         ROOT_DIR / "apps" / "logistics_bot" / ".env",
         APP_DIR / ".env",
-        Path.cwd() / ".env",
-    ]
+    )
 )
 
 WORKSPACE = os.getenv(

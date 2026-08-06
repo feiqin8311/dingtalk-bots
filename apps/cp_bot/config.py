@@ -24,10 +24,22 @@ from dotenv import load_dotenv
 from shared.env import load_env_files
 
 BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / ".env"
-load_env_files([ENV_PATH])
-load_dotenv(ENV_PATH, override=False)
-load_dotenv(ENV_PATH, override=True)
+from shared.env import monorepo_env_paths
+
+load_env_files(
+    monorepo_env_paths(
+        ROOT_DIR,
+        ROOT_DIR / "apps" / "logistics_bot" / ".env",
+        BASE_DIR / ".env",
+    )
+)
+# dotenv optional override for local app .env only if present
+_app_env = BASE_DIR / ".env"
+if _app_env.is_file():
+    load_dotenv(_app_env, override=False)
+_root_env = ROOT_DIR / ".env"
+if _root_env.is_file():
+    load_dotenv(_root_env, override=False)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = os.getenv("LOG_FORMAT", "%(asctime)s | %(levelname)s | %(message)s")

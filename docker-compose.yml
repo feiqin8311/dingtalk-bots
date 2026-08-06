@@ -15,6 +15,7 @@ services:
     container_name: dingtalk-bot
     restart: unless-stopped
     env_file:
+      # 兼容旧分散 .env（仅补缺）
       - path: ./apps/logistics_bot/.env
         required: false
       - path: ./apps/cp_bot/.env
@@ -24,6 +25,9 @@ services:
       - path: ./apps/pinxiang_bot/.env
         required: false
       - path: ./apps/track_notify/.env
+        required: false
+      # 全项目统一配置：仓库根 .env（最后加载，优先）
+      - path: ./.env
         required: false
     environment:
       TZ: Asia/Shanghai

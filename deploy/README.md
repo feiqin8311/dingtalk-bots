@@ -30,8 +30,13 @@ cp deploy/deploy.env.example deploy/deploy.env
 | `DEPLOY_PATH` | `/yida/dingtalk-bots` |
 | `BUILD_HTTP_PROXY` | `http://172.17.0.1:20171` |
 
+## 配置文件
+
+- **统一**：仓库根 `.env`（从 `env.example` 复制；不同步 git）
+- 兼容：`apps/*/.env` 仍可读，仅补缺
+
 ## 保留项（不同步覆盖）
 
-- 各 app 的 `.env`
+- 根 `.env` 与各 app 的 `.env`
 - `files/*.xlsx`
 - `**/.bot-workspace`、`downloads`、`.state`

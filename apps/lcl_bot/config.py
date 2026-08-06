@@ -16,6 +16,7 @@ MONOREPO_ROOT = PACKAGE_DIR.parent.parent
 # yida workspace (sibling Common) = monorepo parent
 YIDA_ROOT = MONOREPO_ROOT.parent
 
+# 统一根 .env；app 级仅补缺
 for candidate in (
     MONOREPO_ROOT / ".env",
     MONOREPO_ROOT / "apps" / "logistics_bot" / ".env",

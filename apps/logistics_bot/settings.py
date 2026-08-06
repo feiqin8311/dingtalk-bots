@@ -54,16 +54,19 @@ class LogisticsBotConfig:
 
 
 def load_config_from_env() -> LogisticsBotConfig:
+    # 统一：仓库根 .env；各 app/.env 仅作兼容补缺
+    from shared.env import monorepo_env_paths
+
     load_env_files(
-        [
-            ROOT_DIR / ".env",
+        monorepo_env_paths(
+            ROOT_DIR,
             ROOT_DIR / "apps" / "logistics_bot" / ".env",
             ROOT_DIR / "apps" / "cp_bot" / ".env",
             ROOT_DIR / "apps" / "split_bot" / ".env",
             ROOT_DIR / "apps" / "pinxiang_bot" / ".env",
             ROOT_DIR / "apps" / "lcl_bot" / ".env",
-            Path.cwd() / ".env",
-        ]
+            ROOT_DIR / "apps" / "track_notify" / ".env",
+        )
     )
     client_id = (
         os.getenv("LOGISTICS_DING_CLIENT_ID")
