@@ -762,7 +762,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             download_url = self.get_image_download_url(code)
             if not download_url:
                 continue
-            response = requests.get(download_url, timeout=120)
+            # trust_env=False: ignore container HTTP_PROXY (breaks Aliyun OSS signed URLs)
+            response = requests.get(download_url, timeout=120, trust_env=False)
             response.raise_for_status()
             file_name = file_names.get(code) or _infer_filename(response.headers, f"file-{index}.xlsx")
             suffix = Path(file_name).suffix.lower()

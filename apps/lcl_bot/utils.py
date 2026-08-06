@@ -246,7 +246,7 @@ class DingTalkAPI:
                                 if 'downloadUrl' in result or 'url' in result:
                                     download_url = result.get('downloadUrl') or result.get('url')
                                     print(f"📥 获取到下载链接: {download_url[:50]}...")
-                                    file_response = requests.get(download_url, timeout=60)
+                                    file_response = requests.get(download_url, timeout=60, trust_env=False)
                                     file_response.raise_for_status()
                                     file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                                     return file_path
@@ -329,7 +329,7 @@ class DingTalkAPI:
                         
                         if download_url:
                             print(f"📥 正在从URL下载: {download_url[:50]}...")
-                            file_response = requests.get(download_url, timeout=60)
+                            file_response = requests.get(download_url, timeout=60, trust_env=False)
                             file_response.raise_for_status()
                             file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                             return file_path
@@ -364,7 +364,7 @@ class DingTalkAPI:
                     if download_url:
                         # 下载文件
                         print(f"📥 正在从URL下载: {download_url[:50]}...")
-                        file_response = requests.get(download_url, timeout=60)
+                        file_response = requests.get(download_url, timeout=60, trust_env=False)
                         file_response.raise_for_status()
                         
                         # 保存文件并返回
@@ -385,7 +385,7 @@ class DingTalkAPI:
                     download_url = response.json().get('downloadUrl')
                     if download_url:
                         print(f"✓ 方式2成功获取下载地址")
-                        file_response = requests.get(download_url, timeout=60)
+                        file_response = requests.get(download_url, timeout=60, trust_env=False)
                         file_response.raise_for_status()
                         file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                         return file_path
@@ -395,7 +395,7 @@ class DingTalkAPI:
             # 方式3: downloadCode可能就是可访问的URL
             if download_code.startswith('http'):
                 print(f"✓ downloadCode本身是URL，直接下载")
-                file_response = requests.get(download_code, headers=headers, timeout=60)
+                file_response = requests.get(download_code, headers=headers, timeout=60, trust_env=False)
                 file_response.raise_for_status()
                 file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                 return file_path

@@ -27,6 +27,13 @@ services:
         required: false
     environment:
       TZ: Asia/Shanghai
+      # Clear build-time proxy if baked into image (OSS/DingTalk downloads must be direct)
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: ""
+      no_proxy: ""
       # 同步文件统一目录：宿主机 ./files → 容器 /app/files
       ADDRESS_BOOK_XLSX_PATH: /app/files/全站点地址.xlsx
       PINXIANG_PRODUCT_INFO_PATH: /app/files/产品信息单证专用.xlsx
