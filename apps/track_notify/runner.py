@@ -17,7 +17,7 @@ if str(ROOT_DIR) not in sys.path:
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from dedup_store import TrackStateStore
+from dedup_store import CST, TrackStateStore
 from dingtalk_table import DingTalkNotableClient, TableRow
 from excel_export import ReportItem, export_filename, format_shipped_at, write_report_xlsx
 from gateway_client import LogisticsGatewayClient
@@ -64,6 +64,23 @@ def _item_from_dict(raw: dict[str, Any]) -> ReportItem:
 def _checkpoint_bucket(store: TrackStateStore, bucket: list[ReportItem]) -> None:
     """查一行记一行：整表快照进 sqlite，进程被杀可恢复。"""
     store.sync_pending_items([_item_to_dict(it) for it in bucket])
+
+
+_TRANSIENT_ISSUE_KEYS = frozenset({"query_error", "no_track"})
+
+
+def _drop_transient_issues(bucket: list[ReportItem], shipment_key: str) -> int:
+    """同单成功查到后，去掉 checkpoint/本轮残留的瞬时失败行，避免误进问题表。"""
+    key = (shipment_key or "").strip()
+    if not key:
+        return 0
+    before = len(bucket)
+    bucket[:] = [
+        it
+        for it in bucket
+        if not (it.shipment_key == key and it.event_key in _TRANSIENT_ISSUE_KEYS)
+    ]
+    return before - len(bucket)
 
 
 def _row_base(row: TableRow) -> dict[str, str]:
@@ -329,6 +346,13 @@ def _process_pingyi_row(
                 logger=logger,
             )
             continue
+        dropped = _drop_transient_issues(bucket, code)
+        if dropped:
+            logger.info(
+                "drop stale pingyi issues fba=%s count=%s (query recovered)",
+                code,
+                dropped,
+            )
         logger.info(
             "track record=%s fba=%s tracking=%s status=%s events=%s",
             row.record_id,
@@ -446,6 +470,13 @@ def _process_longzhou_row(
                 logger=logger,
             )
             continue
+        dropped = _drop_transient_issues(bucket, logistics_no)
+        if dropped:
+            logger.info(
+                "drop stale longzhou issues logistics_no=%s count=%s (query recovered)",
+                logistics_no,
+                dropped,
+            )
         logger.info(
             "track record=%s logistics_no=%s brand=%s events=%s latest=%s",
             row.record_id,
@@ -580,6 +611,110 @@ def _retry_longzhou_query_errors(
             shipment_key=logistics_no,
             display_code=logistics_no,
             kind="longzhou",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return stats
+
+
+def _retry_pingyi_query_errors(
+    bucket: list[ReportItem],
+    rows: list[TableRow],
+    *,
+    pingyi: PingyiClient | None,
+    store: TrackStateStore,
+    logger: logging.Logger,
+    pause_sec: float = 1.0,
+) -> dict[str, int]:
+    """
+    平谊瞬时超时：全量结束后对 query_error 再串行重查 1 轮。
+    成功则去掉 query_error 并写节点；仍失败则保留问题行。
+    """
+    stats = {"pingyi_retry": 0, "pingyi_recovered": 0}
+    if pingyi is None or not bucket:
+        return stats
+
+    by_fba: dict[str, TableRow] = {}
+    for row in rows:
+        if _carrier_kind(row.carrier) != "pingyi":
+            continue
+        for code in row.fba_codes:
+            key = (code or "").strip()
+            if key:
+                by_fba[key] = row
+
+    targets: list[tuple[TableRow, str]] = []
+    seen: set[str] = set()
+    for it in bucket:
+        if it.event_key != "query_error":
+            continue
+        code = (it.fba_code or it.shipment_key or "").strip()
+        if not code or code not in by_fba or code in seen:
+            continue
+        seen.add(code)
+        targets.append((by_fba[code], code))
+
+    if not targets:
+        return stats
+
+    logger.info(
+        "pingyi retry pass count=%s pause=%ss (serial)",
+        len(targets),
+        pause_sec,
+    )
+    stats["pingyi_retry"] = len(targets)
+
+    for i, (row, code) in enumerate(targets):
+        if i > 0 and pause_sec > 0:
+            time.sleep(pause_sec)
+        ok_uids = notify_user_ids(row.owners, issue=False)
+        issue_uids = notify_user_ids(row.owners, issue=True)
+        logistics_joined = ",".join(row.logistics_nos)
+        try:
+            shipment = pingyi.get_track(code)
+        except Exception as exc:
+            logger.warning("pingyi retry still failed fba=%s: %s", code, exc)
+            continue
+
+        bucket[:] = [
+            it
+            for it in bucket
+            if not (it.event_key == "query_error" and it.shipment_key == code)
+        ]
+        stats["pingyi_recovered"] += 1
+
+        if shipment is None:
+            line = _no_track_line(row, code)
+            logger.info("pingyi retry no track fba=%s record=%s", code, row.record_id)
+            _collect_once(
+                shipment_key=code,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=code,
+                logistics_no=logistics_joined,
+                detail=line,
+                logger=logger,
+            )
+            continue
+
+        logger.info(
+            "pingyi retry ok fba=%s events=%s status=%s",
+            code,
+            len(shipment.events),
+            shipment.track_status_name or shipment.track_status,
+        )
+        _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=code,
+            display_code=code,
+            kind="pingyi",
             user_ids=ok_uids,
             store=store,
             bucket=bucket,
@@ -748,6 +883,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             config.pingyi_app_token,
             config.pingyi_app_key,
             base_url=config.pingyi_base_url,
+            timeout_sec=config.pingyi_timeout_sec,
+            retries=config.pingyi_retries,
         )
     gateway: LogisticsGatewayClient | None = None
     if config.gateway_base_url and config.gateway_api_key:
@@ -768,6 +905,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
         "query_issues": 0,
         "gateway_retry": 0,
         "gateway_recovered": 0,
+        "pingyi_retry": 0,
+        "pingyi_recovered": 0,
         "pending_resumed": 0,
         "excel_rows": 0,
         "excel_files": 0,
@@ -776,24 +915,33 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
     }
     issue_lines: list[str] = []
     try:
-        # 崩溃恢复：上次已查出未推送的行先落盘/推送，避免白跑
+        # pending 只做同日崩溃恢复入库，不提前发；全量查完后统一发一次
         if not dry_run:
-            leftover = [_item_from_dict(r) for r in store.load_pending_items()]
-            if leftover:
+            today_ymd = datetime.now(tz=CST).strftime("%Y-%m-%d")
+            discarded = store.discard_pending_if_stale(today_ymd)
+            if discarded:
                 logger.info(
-                    "resume pending report items count=%s (checkpoint from prior run)",
-                    len(leftover),
+                    "discard stale pending count=%s (not same day as %s); full re-query",
+                    discarded,
+                    today_ymd,
                 )
-                stats["pending_resumed"] = len(leftover)
-                resume_deliver = _deliver_excel_reports(
-                    leftover,
-                    config=config,
-                    store=store,
-                    dry_run=False,
-                    logger=logger,
+            drop_pairs: list[tuple[str, str]] = []
+            for raw in store.load_pending_items():
+                item = _item_from_dict(raw)
+                keys = item.keys_to_mark()
+                if keys and all(store.has_event(item.shipment_key, ek) for ek in keys):
+                    drop_pairs.append((item.shipment_key, item.event_key))
+                    continue
+                bucket.append(item)
+            if drop_pairs:
+                store.clear_pending_for(drop_pairs)
+                logger.info("drop already-notified pending count=%s", len(drop_pairs))
+            if bucket:
+                stats["pending_resumed"] = len(bucket)
+                logger.info(
+                    "seed bucket from same-day checkpoint count=%s (send only after full query)",
+                    len(bucket),
                 )
-                for k, v in resume_deliver.items():
-                    stats[k] = stats.get(k, 0) + v
 
         rows = table.iter_candidate_rows(
             config.dingtalk_doc_key,
@@ -805,6 +953,10 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
         stats["candidates"] = len(rows)
         # 每次都查：不按行级 checked 跳过；去重只在「指定节点已推送」层
         pending = list(rows)
+        # 本轮新查出的结果按 key 覆盖 checkpoint 旧项，避免重复行
+        seen_keys: set[tuple[str, str]] = {
+            (it.shipment_key, it.event_key) for it in bucket if it.shipment_key and it.event_key
+        }
 
         workers = max(1, min(config.query_workers, len(pending) or 1))
         logger.info(
@@ -844,15 +996,26 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                     stats["missing_key"] += 1
                 stats["processed"] += 1
                 stats["collected"] += collected
-                bucket.extend(local)
+                for it in local:
+                    k = (it.shipment_key, it.event_key)
+                    if k in seen_keys:
+                        # 新结果覆盖 checkpoint 同 key 项
+                        bucket[:] = [
+                            x
+                            for x in bucket
+                            if (x.shipment_key, x.event_key) != k
+                        ]
+                    else:
+                        seen_keys.add(k)
+                    bucket.append(it)
                 if issues:
                     stats["query_issues"] += len(issues)
                     issue_lines.extend(issues)
-                # 跑一个记一个（整表快照，含本行结果）
+                # 只落盘，不发送
                 if not dry_run:
                     _checkpoint_bucket(store, bucket)
 
-        # 龙舟瞬时失败：全量结束后再串行重查 1 轮 query_error
+        # 瞬时失败：全量结束后再串行重查 1 轮 query_error（龙舟 / 平谊）
         retry_stats = _retry_longzhou_query_errors(
             bucket,
             pending,
@@ -862,8 +1025,17 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             pause_sec=3.0,
         )
         stats.update(retry_stats)
+        py_retry = _retry_pingyi_query_errors(
+            bucket,
+            pending,
+            pingyi=pingyi,
+            store=store,
+            logger=logger,
+            pause_sec=1.0,
+        )
+        stats.update(py_retry)
         # 重试后问题行可能变少，issue 摘要以 bucket 为准
-        if retry_stats.get("gateway_recovered"):
+        if retry_stats.get("gateway_recovered") or py_retry.get("pingyi_recovered"):
             issue_lines = [
                 it.detail or it.message
                 for it in bucket
@@ -874,8 +1046,23 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
         if not dry_run:
             _checkpoint_bucket(store, bucket)
 
+        # 过滤本轮查询过程中已 mark 的（理论上不应有）；再统一发送一次
+        final_items: list[ReportItem] = []
+        for it in bucket:
+            keys = it.keys_to_mark()
+            if keys and all(store.has_event(it.shipment_key, ek) for ek in keys):
+                continue
+            final_items.append(it)
+
+        logger.info(
+            "query complete candidates=%s processed=%s bucket=%s final_send=%s",
+            stats["candidates"],
+            stats["processed"],
+            len(bucket),
+            len(final_items),
+        )
         deliver = _deliver_excel_reports(
-            bucket,
+            final_items,
             config=config,
             store=store,
             dry_run=dry_run,

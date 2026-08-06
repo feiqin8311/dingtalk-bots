@@ -22,7 +22,7 @@
    - b. 节点级去重（sqlite `notified_events`：周一已推「已到达卸货港」，周三无新节点不推；出现「已提柜」再推）  
    - c. **每次仍全量查询候选行**（不再整行 skip）  
    - c2. **龙舟网关瞬时失败**：本轮结束后对 `query_error` **再串行重查 1 轮**（票间 pause 3s）；仍失败才进问题表  
-   - c3. **查一行记一行**：结果写入 sqlite `pending_report_items`；进程被杀后下次 `--once` **先补推/落盘 pending**，再继续全量查  
+    - c3. **查一行记一行**：结果写入 sqlite `pending_report_items`（只落盘不发）；下次 `--once` 同日把 checkpoint 并入 bucket 后继续全量查，**全部查完后才统一发一次 Excel**；跨日丢弃 pending
    - d. **按接收人生成 Excel**  
      - **完整节点**：表内负责人 + **柯鹏翔**（柯鹏翔收全量完整数据）  
      - **问题数据**（缺号/无轨迹/查询失败）：**只推柯鹏翔**，不推物流人员  
@@ -55,6 +55,8 @@ python3 apps/track_notify/main.py FBA19JTBN929 --dry-run
 | 变量 | 用途 |
 |------|------|
 | `PINGYI_*` | 平谊 API |
+| `PINGYI_TIMEOUT_SEC` | 平谊单次超时，默认 `60` |
+| `PINGYI_RETRIES` | 超时/网络失败重试次数，默认 `2`（共 3 次） |
 | `LOGISTICS_GATEWAY_BASE_URL` / `LOGISTICS_GATEWAY_API_KEY` | 龙舟网关 |
 | `LOGISTICS_GATEWAY_TIMEOUT_SEC` | 单次 AGL 超时，默认 `240`（实测 ~80s） |
 | `TRACK_QUERY_WORKERS` | 行级线程池，默认 `4`（主要加速平谊） |

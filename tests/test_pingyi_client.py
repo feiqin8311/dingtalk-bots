@@ -103,6 +103,33 @@ class PingyiClientTests(unittest.TestCase):
         )
         self.assertIn("BG", event.dedup_key)
 
+    def test_timeout_retries_then_ok(self):
+        client = PingyiClient("token", "key", timeout_sec=5, retries=2)
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=0):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise TimeoutError("timed out")
+            return FakeResponse(SAMPLE_TRACK)
+
+        with patch("pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("pingyi_client.time.sleep", return_value=None):
+                shipment = client.get_track("FBA19JTBN929")
+        self.assertIsNotNone(shipment)
+        self.assertEqual(calls["n"], 3)
+
+    def test_timeout_exhausted_raises(self):
+        client = PingyiClient("token", "key", timeout_sec=5, retries=1)
+
+        def fake_urlopen(req, timeout=0):
+            raise TimeoutError("timed out")
+
+        with patch("pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("pingyi_client.time.sleep", return_value=None):
+                with self.assertRaises(TimeoutError):
+                    client.get_track("FBA19JTBN929")
+
 
 if __name__ == "__main__":
     unittest.main()

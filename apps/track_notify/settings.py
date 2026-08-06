@@ -26,6 +26,9 @@ class TrackNotifyConfig:
     pingyi_base_url: str
     pingyi_app_token: str
     pingyi_app_key: str
+    # 平谊 getTrack 超时（默认 60）；并发时偶发慢，配合客户端重试
+    pingyi_timeout_sec: float
+    pingyi_retries: int
     gateway_base_url: str
     gateway_api_key: str
     gateway_timeout_sec: float
@@ -111,6 +114,15 @@ def load_config_from_env() -> TrackNotifyConfig:
     if not state_dir.is_absolute():
         state_dir = ROOT_DIR / state_dir
     try:
+        pingyi_timeout = float((os.getenv("PINGYI_TIMEOUT_SEC") or "60").strip())
+    except ValueError:
+        pingyi_timeout = 60.0
+    try:
+        pingyi_retries = int((os.getenv("PINGYI_RETRIES") or "2").strip())
+    except ValueError:
+        pingyi_retries = 2
+    pingyi_retries = max(0, min(5, pingyi_retries))
+    try:
         gateway_timeout = float((os.getenv("LOGISTICS_GATEWAY_TIMEOUT_SEC") or "240").strip())
     except ValueError:
         gateway_timeout = 240.0
@@ -150,6 +162,8 @@ def load_config_from_env() -> TrackNotifyConfig:
         pingyi_base_url=(os.getenv("PINGYI_BASE_URL") or "http://hzpy.rtb56.com").strip(),
         pingyi_app_token=token,
         pingyi_app_key=key,
+        pingyi_timeout_sec=max(15.0, pingyi_timeout),
+        pingyi_retries=pingyi_retries,
         gateway_base_url=(
             os.getenv("LOGISTICS_GATEWAY_BASE_URL")
             or "http://host.docker.internal:18743"

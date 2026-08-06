@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,6 +12,9 @@ from typing import Any
 
 DEFAULT_BASE_URL = "http://hzpy.rtb56.com"
 PUBLIC_SERVICE_PATH = "/webservice/PublicService.asmx/ServiceInterfaceUTF8"
+# 并发查轨迹时偶发 >30s；默认 60 + 超时重试，避免误报 query_error
+DEFAULT_TIMEOUT_SEC = 60.0
+DEFAULT_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -55,14 +60,16 @@ class PingyiClient:
         app_key: str,
         *,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_sec: float = 30,
+        timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+        retries: int = DEFAULT_RETRIES,
     ) -> None:
         if not app_token or not app_key:
             raise ValueError("pingyi appToken/appKey required")
         self.app_token = app_token
         self.app_key = app_key
         self.base_url = base_url.rstrip("/")
-        self.timeout_sec = timeout_sec
+        self.timeout_sec = max(5.0, float(timeout_sec))
+        self.retries = max(0, int(retries))
 
     def call(self, service_method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         body = urllib.parse.urlencode(
@@ -80,12 +87,25 @@ class PingyiClient:
             method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"pingyi HTTP {exc.code}: {detail}") from exc
+        attempts = self.retries + 1
+        last_exc: BaseException | None = None
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"pingyi HTTP {exc.code}: {detail}") from exc
+            except (TimeoutError, socket.timeout, urllib.error.URLError, OSError) as exc:
+                last_exc = exc
+                # URLError.reason 可能是 timeout；瞬时网络也重试
+                if attempt + 1 >= attempts:
+                    raise
+                time.sleep(min(2.0 * (attempt + 1), 5.0))
+        else:
+            assert last_exc is not None
+            raise last_exc
         if not raw:
             return {}
         data = json.loads(raw)
