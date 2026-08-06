@@ -3,8 +3,9 @@
 """将拼箱结果写入 Amazon Manifest 上传模版。
 
 规则（流程三）：
-- 不拼箱（原箱 / 原箱-整数部分）：填 Units per box / 箱数 / 尺寸 / 重量
-- 拼箱（改箱/合箱/余数等）：只填 Merchant SKU + Quantity；同 SKU 合并数量，不写尺寸
+- 优先用「用于生成模版1」：整箱(是)填箱规；非整箱(否)仅 Merchant SKU + Quantity
+- 无该 sheet 时回退 amazon_rows：原箱填箱规；改箱同 SKU 合并数量且不写尺寸
+- 国家：美国 → cm/kg 换 in/lb；加拿大 → 公制直填；其它默认按美国
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Union
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side
 
-from packing import PackingResult, PackingRow  # noqa: E402
+from packing import PackingResult, PackingRow, Template1Row  # noqa: E402
 
 PathLike = Union[str, Path]
 
@@ -34,6 +35,9 @@ TEMPLATE_SHEET = "Create workflow – template"
 
 # 视为原厂包装（不拼箱）的 remark
 _ORIGINAL_CASE_REMARKS = frozenset({"原箱", "原箱-整数部分"})
+
+_CANADA_MARKERS = frozenset({"加拿大", "canada", "ca", "can"})
+_US_MARKERS = frozenset({"美国", "美國", "us", "usa", "united states", "united states of america"})
 
 
 def create_amazon_workbook(
@@ -59,11 +63,19 @@ def create_amazon_workbook(
 
     _apply_default_owners(ws, default_prep_owner, default_labeling_owner)
 
+    imperial = _use_imperial(_resolve_country(result))
     header_row = _find_header_row(ws)
     data_row = header_row + 1
-    for row, with_case_pack in _manifest_rows(result.amazon_rows):
-        _write_data_row(ws, data_row, row, with_case_pack=with_case_pack)
-        data_row += 1
+    if result.template1_rows:
+        for t1 in result.template1_rows:
+            _write_template1_data_row(ws, data_row, t1, imperial=imperial)
+            data_row += 1
+    else:
+        for row, with_case_pack in _manifest_rows(result.amazon_rows):
+            _write_data_row(
+                ws, data_row, row, with_case_pack=with_case_pack, imperial=imperial
+            )
+            data_row += 1
 
     wb.save(out)
     return out
@@ -213,7 +225,56 @@ def _num_cell(value: float):
     return value
 
 
-def _write_data_row(ws, row_idx: int, row: PackingRow, *, with_case_pack: bool) -> None:
+def _resolve_country(result: PackingResult) -> str:
+    if (result.country or "").strip():
+        return result.country.strip()
+    for row in result.template1_rows or []:
+        if (row.country or "").strip():
+            return row.country.strip()
+    return ""
+
+
+def _use_imperial(country: str) -> bool:
+    """美国/空 → 英制；加拿大 → 公制。"""
+    text = (country or "").strip().lower()
+    if not text:
+        return True
+    if text in _CANADA_MARKERS or "加拿大" in (country or "") or "canada" in text:
+        return False
+    if text in _US_MARKERS or "美国" in (country or "") or "美國" in (country or ""):
+        return True
+    # 未识别：沿用原默认（转英制）
+    return True
+
+
+def _dim_weight_cells(
+    length_cm: float,
+    width_cm: float,
+    height_cm: float,
+    weight_kg: float,
+    *,
+    imperial: bool,
+) -> list:
+    if not length_cm and not width_cm and not height_cm and not weight_kg:
+        return ["", "", "", ""]
+    if imperial:
+        return [
+            round(length_cm * CM_TO_INCH, 2) if length_cm else "",
+            round(width_cm * CM_TO_INCH, 2) if width_cm else "",
+            round(height_cm * CM_TO_INCH, 2) if height_cm else "",
+            round(weight_kg * KG_TO_LB, 2) if weight_kg else "",
+        ]
+    return [
+        round(length_cm, 2) if length_cm else "",
+        round(width_cm, 2) if width_cm else "",
+        round(height_cm, 2) if height_cm else "",
+        round(weight_kg, 2) if weight_kg else "",
+    ]
+
+
+def _write_data_row(
+    ws, row_idx: int, row: PackingRow, *, with_case_pack: bool, imperial: bool = True
+) -> None:
     msku = row.msku or row.sku
     if with_case_pack:
         values = [
@@ -223,10 +284,13 @@ def _write_data_row(ws, row_idx: int, row: PackingRow, *, with_case_pack: bool) 
             "",  # Manufacturing lot code
             _num_cell(row.units_per_box),
             _num_cell(row.box_count),
-            round(row.length_cm * CM_TO_INCH, 2) if row.length_cm else "",
-            round(row.width_cm * CM_TO_INCH, 2) if row.width_cm else "",
-            round(row.height_cm * CM_TO_INCH, 2) if row.height_cm else "",
-            round(row.box_weight_kg * KG_TO_LB, 2) if row.box_weight_kg else "",
+            *_dim_weight_cells(
+                row.length_cm,
+                row.width_cm,
+                row.height_cm,
+                row.box_weight_kg,
+                imperial=imperial,
+            ),
         ]
     else:
         # 拼箱：仅 SKU + 数量，尺寸/箱规留空
@@ -242,6 +306,34 @@ def _write_data_row(ws, row_idx: int, row: PackingRow, *, with_case_pack: bool) 
             "",
             "",
         ]
+    for col, value in enumerate(values, start=1):
+        cell = ws.cell(row=row_idx, column=col, value=value)
+        cell.border = THIN_BORDER
+
+
+def _write_template1_data_row(
+    ws, row_idx: int, row: Template1Row, *, imperial: bool = True
+) -> None:
+    """按「用于生成模版1」写 Manifest 行。"""
+    msku = row.merchant_sku
+    if row.is_full_box:
+        values = [
+            msku,
+            _num_cell(row.qty),
+            "",
+            "",
+            _num_cell(row.units_per_box or 0),
+            _num_cell(row.box_count or 0),
+            *_dim_weight_cells(
+                float(row.length_cm or 0),
+                float(row.width_cm or 0),
+                float(row.height_cm or 0),
+                float(row.box_weight_kg or 0),
+                imperial=imperial,
+            ),
+        ]
+    else:
+        values = [msku, _num_cell(row.qty), "", "", "", "", "", "", "", ""]
     for col, value in enumerate(values, start=1):
         cell = ws.cell(row=row_idx, column=col, value=value)
         cell.border = THIN_BORDER

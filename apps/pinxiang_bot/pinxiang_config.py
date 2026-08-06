@@ -55,7 +55,8 @@ PENDING_TTL_SEC = int((os.getenv("PINXIANG_PENDING_TTL_SEC") or "3600").strip())
 # 运营当前单 + 排队：长 TTL（容器重启后仍可恢复）
 OPS_PENDING_TTL_SEC = int((os.getenv("PINXIANG_OPS_PENDING_TTL_SEC") or "604800").strip())  # 7d
 
-# Amazon Manifest 模板（与 dingtalk-lcl-bot/Template_Files 一致）
+# Amazon Manifest 模板
+# MPL / MPL2：美国（in/lb）；MPL3：加拿大（cm/kg）
 _TEMPLATES_DIR = APP_DIR / "templates"
 AMAZON_TEMPLATE_MPL = Path(
     (
@@ -75,6 +76,33 @@ AMAZON_TEMPLATE_MPL2 = Path(
         )
     ).strip()
 )
+AMAZON_TEMPLATE_MPL3 = Path(
+    (
+        os.getenv("PINXIANG_AMAZON_TEMPLATE_MPL3")
+        or str(
+            _TEMPLATES_DIR
+            / "ManifestFileUpload_Template_IncludeCasePack_IncludeExpirationDate_IncludeMLC_MPL3.xlsx"
+        )
+    ).strip()
+)
+
+
+def amazon_template_mpl(country: str = "") -> Path:
+    """模板1：加拿大用 MPL3，其它用 MPL。"""
+    from amazon_export import _use_imperial
+
+    if not _use_imperial(country):
+        return AMAZON_TEMPLATE_MPL3
+    return AMAZON_TEMPLATE_MPL
+
+
+def amazon_template_mpl2(country: str = "") -> Path:
+    """模板2：加拿大仍用 MPL3 壳；美国用 MPL2。"""
+    from amazon_export import _use_imperial
+
+    if not _use_imperial(country):
+        return AMAZON_TEMPLATE_MPL3
+    return AMAZON_TEMPLATE_MPL2
 
 # 运营人员（物流确认后选择转发对象）
 # 可用 env 覆盖：PINXIANG_OPS_USERS=袁皓冉:id1,陈潇潇:id2

@@ -47,6 +47,20 @@ PACKING_HEADERS = (
 
 # 拼箱结果表仅改箱；Amazon 模板用全量（原箱+改箱），与首次模板1一致
 AMAZON_DATA_SHEET = "Amazon全量"
+# 人工核对用：原发行「是否整箱」；整箱填箱规，非整箱仅 SKU+数量
+TEMPLATE1_SHEET = "用于生成模版1"
+TEMPLATE1_HEADERS = (
+    "是否整箱（只是用于核对，无实际意义）",
+    "国家",
+    "SKU",
+    "发货数量",
+    "单箱数量",
+    "箱数",
+    "箱子毛重（kg）",
+    "箱子长度（cm）",
+    "箱子宽度（cm）",
+    "箱子高度（cm）",
+)
 
 
 @dataclass(frozen=True)
@@ -105,6 +119,43 @@ class PackingRow:
 
 
 @dataclass
+class Template1Row:
+    """「用于生成模版1」一行：整箱带箱规，非整箱仅国家/SKU/数量。"""
+
+    is_full_box: bool
+    country: str
+    sku: str
+    qty: float
+    msku: str = ""
+    units_per_box: Optional[float] = None
+    box_count: Optional[float] = None
+    box_weight_kg: Optional[float] = None
+    length_cm: Optional[float] = None
+    width_cm: Optional[float] = None
+    height_cm: Optional[float] = None
+
+    @property
+    def merchant_sku(self) -> str:
+        return (self.msku or self.sku or "").strip()
+
+    def as_cells(self) -> list[Any]:
+        if self.is_full_box:
+            return [
+                "是",
+                self.country,
+                self.sku,
+                _num(self.qty),
+                _num(self.units_per_box or 0),
+                _num(self.box_count or 0),
+                _round2(self.box_weight_kg or 0),
+                _round1(self.length_cm or 0),
+                _round1(self.width_cm or 0),
+                _round1(self.height_cm or 0),
+            ]
+        return ["否", self.country, self.sku, _num(self.qty), None, None, None, None, None, None]
+
+
+@dataclass
 class PackingResult:
     rows: list[PackingRow] = field(default_factory=list)
     all_rows: list[PackingRow] = field(default_factory=list)
@@ -113,6 +164,7 @@ class PackingResult:
     logistics_channel: str = ""
     store_name: str = ""
     country: str = ""
+    template1_rows: list[Template1Row] = field(default_factory=list)
 
     @property
     def amazon_rows(self) -> list[PackingRow]:
@@ -171,6 +223,7 @@ def process_shipment_file(
     result.logistics_channel = channel
     result.store_name = store
     result.country = country
+    result.template1_rows = _build_template1_rows(items, country)
     return result
 
 
@@ -386,6 +439,9 @@ def load_packing_result_workbook(input_path: PathLike) -> PackingResult:
         amazon_raw = None
         if AMAZON_DATA_SHEET in wb.sheetnames:
             amazon_raw = list(wb[AMAZON_DATA_SHEET].iter_rows(values_only=True))
+        template1_raw = None
+        if TEMPLATE1_SHEET in wb.sheetnames:
+            template1_raw = list(wb[TEMPLATE1_SHEET].iter_rows(values_only=True))
     finally:
         wb.close()
     rows = _rows_from_sheet_values(rows_raw)
@@ -402,7 +458,11 @@ def load_packing_result_workbook(input_path: PathLike) -> PackingResult:
         rows = []
     if not rows and not all_rows:
         raise ValueError("拼箱结果中没有可用的 SKU 行")
-    return PackingResult(rows=rows, all_rows=all_rows)
+    template1_rows = _template1_from_sheet_values(template1_raw or [])
+    country = next((r.country for r in template1_rows if (r.country or "").strip()), "")
+    return PackingResult(
+        rows=rows, all_rows=all_rows, template1_rows=template1_rows, country=country
+    )
 
 
 def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path:
@@ -416,6 +476,8 @@ def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path
     amazon_rows = list(result.amazon_rows)
     ws_amz = wb.create_sheet(AMAZON_DATA_SHEET)
     _write_packing_sheet(ws_amz, amazon_rows)
+    ws_t1 = wb.create_sheet(TEMPLATE1_SHEET)
+    _write_template1_sheet(ws_t1, result.template1_rows)
     if result.warnings:
         ws2 = wb.create_sheet("警告")
         ws2.append(["警告"])
@@ -423,6 +485,111 @@ def write_packing_workbook(result: PackingResult, output_path: PathLike) -> Path
             ws2.append([msg])
     wb.save(path)
     return path
+
+
+def _build_template1_rows(items: Sequence[LineItem], country: str) -> list[Template1Row]:
+    """按原发货行：整箱(是)在前填箱规，非整箱(否)仅 SKU+数量。"""
+    full: list[Template1Row] = []
+    partial: list[Template1Row] = []
+    for item in items:
+        if item.units_per_box <= 0:
+            continue
+        ratio = item.qty / item.units_per_box
+        msku = (item.msku or item.sku or "").strip()
+        if _is_integer(ratio) and ratio >= 1:
+            full.append(
+                Template1Row(
+                    is_full_box=True,
+                    country=country or "",
+                    sku=item.sku,
+                    qty=item.qty,
+                    msku=msku,
+                    units_per_box=item.units_per_box,
+                    box_count=ratio,
+                    box_weight_kg=item.box_weight_kg,
+                    length_cm=item.length_cm,
+                    width_cm=item.width_cm,
+                    height_cm=item.height_cm,
+                )
+            )
+        else:
+            partial.append(
+                Template1Row(
+                    is_full_box=False,
+                    country=country or "",
+                    sku=item.sku,
+                    qty=item.qty,
+                    msku=msku,
+                )
+            )
+    return full + partial
+
+
+def _write_template1_sheet(ws, rows: Sequence[Template1Row]) -> None:
+    thin = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+    center = Alignment(horizontal="center", vertical="center")
+    for col, header in enumerate(TEMPLATE1_HEADERS, start=1):
+        cell = ws.cell(1, col, header)
+        cell.font = Font(bold=True)
+        cell.border = thin
+        cell.alignment = center
+    for r_idx, row in enumerate(rows, start=2):
+        for c_idx, value in enumerate(row.as_cells(), start=1):
+            cell = ws.cell(r_idx, c_idx, value)
+            cell.border = thin
+            cell.alignment = center
+
+
+def _template1_from_sheet_values(rows_raw: list) -> list[Template1Row]:
+    if not rows_raw:
+        return []
+    header = [_cell_str(c) for c in rows_raw[0]]
+    idx = _header_index(header)
+    if "SKU" not in idx:
+        return []
+    out: list[Template1Row] = []
+    for raw in rows_raw[1:]:
+        if not raw or all(v is None or str(v).strip() == "" for v in raw):
+            continue
+        sku = _cell_str(_get(raw, idx, "SKU"))
+        if not sku:
+            continue
+        qty = _to_float(_get(raw, idx, "发货数量"))
+        if qty is None:
+            continue
+        flag = _cell_str(_get(raw, idx, "是否整箱（只是用于核对，无实际意义）"))
+        is_full = flag == "是"
+        country = _cell_str(_get(raw, idx, "国家"))
+        if is_full:
+            out.append(
+                Template1Row(
+                    is_full_box=True,
+                    country=country,
+                    sku=sku,
+                    qty=float(qty),
+                    units_per_box=_to_float(_get(raw, idx, "单箱数量")),
+                    box_count=_to_float(_get(raw, idx, "箱数")),
+                    box_weight_kg=_to_float(_get(raw, idx, "箱子毛重（kg）")),
+                    length_cm=_to_float(_get(raw, idx, "箱子长度（cm）")),
+                    width_cm=_to_float(_get(raw, idx, "箱子宽度（cm）")),
+                    height_cm=_to_float(_get(raw, idx, "箱子高度（cm）")),
+                )
+            )
+        else:
+            out.append(
+                Template1Row(
+                    is_full_box=False,
+                    country=country,
+                    sku=sku,
+                    qty=float(qty),
+                )
+            )
+    return out
 
 
 # --- 合箱 / 借箱 ---

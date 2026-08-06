@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""把拼箱结果写入亚马逊「包装箱包装信息」表（运营上传的 STA 装箱表）。"""
+"""把拼箱结果写入亚马逊「包装箱包装信息」表（运营上传的 STA 装箱表）。
+
+国家：美国 → cm/kg 换 in/lb；加拿大 → 公制直填；其它默认美国。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ from typing import Sequence, Union
 
 from openpyxl import load_workbook
 
+from amazon_export import _use_imperial  # noqa: E402
 from packing import PackingRow
 
 PathLike = Union[str, Path]
@@ -35,13 +39,18 @@ class BoxPlan:
     """一个物理包装箱，可含多 SKU（合箱）。"""
 
     lines: list[BoxSkuLine] = field(default_factory=list)
+    # 字段名历史遗留；加拿大时存公制 cm/kg
     weight_lb: float = 0.0
     width_in: float = 0.0
     length_in: float = 0.0
     height_in: float = 0.0
 
 
-def expand_packing_rows_to_boxes(rows: Sequence[PackingRow]) -> list[BoxPlan]:
+def expand_packing_rows_to_boxes(
+    rows: Sequence[PackingRow],
+    *,
+    imperial: bool = True,
+) -> list[BoxPlan]:
     """拼箱行 → 物理箱列表。同 box_group_id 合并为一箱；原箱-整数部分按箱数展开。"""
     boxes: list[BoxPlan] = []
     grouped: "OrderedDict[str, list[PackingRow]]" = OrderedDict()
@@ -61,18 +70,17 @@ def expand_packing_rows_to_boxes(rows: Sequence[PackingRow]) -> list[BoxPlan]:
         units = int(round(row.units_per_box))
         keys = {str(row.sku).strip(), str(row.msku or "").strip()}
         keys.discard("")
-        weight_lb = round(float(row.box_weight_kg) * KG_TO_LB, 10)
-        width_in = round(float(row.width_cm) * CM_TO_INCH, 10)
-        length_in = round(float(row.length_cm) * CM_TO_INCH, 10)
-        height_in = round(float(row.height_cm) * CM_TO_INCH, 10)
+        weight, width, length, height = _box_dims(
+            row.box_weight_kg, row.width_cm, row.length_cm, row.height_cm, imperial=imperial
+        )
         for _ in range(n_boxes):
             boxes.append(
                 BoxPlan(
                     lines=[BoxSkuLine(keys=set(keys), units=units)],
-                    weight_lb=weight_lb,
-                    width_in=width_in,
-                    length_in=length_in,
-                    height_in=height_in,
+                    weight_lb=weight,
+                    width_in=width,
+                    length_in=length,
+                    height_in=height,
                 )
             )
 
@@ -86,13 +94,20 @@ def expand_packing_rows_to_boxes(rows: Sequence[PackingRow]) -> list[BoxPlan]:
             lines.append(BoxSkuLine(keys=keys, units=max(units, 0)))
         # 同箱总重/尺寸取第一行（合箱时各行已写相同值）
         head = members[0]
+        weight, width, length, height = _box_dims(
+            head.box_weight_kg,
+            head.width_cm,
+            head.length_cm,
+            head.height_cm,
+            imperial=imperial,
+        )
         boxes.append(
             BoxPlan(
                 lines=lines,
-                weight_lb=round(float(head.box_weight_kg) * KG_TO_LB, 10),
-                width_in=round(float(head.width_cm) * CM_TO_INCH, 10),
-                length_in=round(float(head.length_cm) * CM_TO_INCH, 10),
-                height_in=round(float(head.height_cm) * CM_TO_INCH, 10),
+                weight_lb=weight,
+                width_in=width,
+                length_in=length,
+                height_in=height,
             )
         )
     return boxes
@@ -102,6 +117,8 @@ def fill_amazon_packaging_file(
     amazon_path: PathLike,
     packing_rows: Sequence[PackingRow],
     output_path: PathLike,
+    *,
+    country: str = "",
 ) -> Path:
     src = Path(amazon_path)
     out = Path(output_path)
@@ -109,7 +126,8 @@ def fill_amazon_packaging_file(
     if src.resolve() != out.resolve():
         shutil.copy2(src, out)
 
-    boxes = expand_packing_rows_to_boxes(packing_rows)
+    imperial = _use_imperial(country)
+    boxes = expand_packing_rows_to_boxes(packing_rows, imperial=imperial)
     if not boxes:
         raise ValueError("拼箱结果为空，无法填写包装箱包装信息")
 
@@ -182,6 +200,30 @@ def is_amazon_packaging_workbook(path: PathLike) -> bool:
         return ok
     except Exception:
         return False
+
+
+def _box_dims(
+    weight_kg: float,
+    width_cm: float,
+    length_cm: float,
+    height_cm: float,
+    *,
+    imperial: bool,
+) -> tuple[float, float, float, float]:
+    """返回 (weight, width, length, height)；imperial=True 时为 lb/in。"""
+    if imperial:
+        return (
+            round(float(weight_kg) * KG_TO_LB, 10),
+            round(float(width_cm) * CM_TO_INCH, 10),
+            round(float(length_cm) * CM_TO_INCH, 10),
+            round(float(height_cm) * CM_TO_INCH, 10),
+        )
+    return (
+        round(float(weight_kg), 10),
+        round(float(width_cm), 10),
+        round(float(length_cm), 10),
+        round(float(height_cm), 10),
+    )
 
 
 def _units_for_sku(amazon_sku: str, box: BoxPlan) -> int:

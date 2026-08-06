@@ -222,7 +222,12 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
 
         amazon_template_path = await asyncio.get_running_loop().run_in_executor(
             None,
-            partial(self._build_amazon_template, job_dir, result, pinxiang_config.AMAZON_TEMPLATE_MPL),
+            partial(
+                self._build_amazon_template,
+                job_dir,
+                result,
+                pinxiang_config.amazon_template_mpl(result.country or ""),
+            ),
         )
 
         shipment_copy = job_dir / shipment.file_name
@@ -285,6 +290,13 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             stem = pending.packing_result_path.stem.replace(" 拼箱数据", "").strip()
             if stem:
                 result.shipment_sns = [p for p in stem.split() if p.startswith("SP")]
+        # 修正表常只有「拼箱结果」：沿用上一份「用于生成模版1」
+        if not result.template1_rows and pending.packing_result_path.is_file():
+            try:
+                prev = load_packing_result_workbook(pending.packing_result_path)
+                result.template1_rows = list(prev.template1_rows)
+            except Exception:
+                pass
 
         packing_name = f"{result.result_basename(fallback=Path(uploaded.file_name).stem)}.xlsx"
         packing_path = pending.merge_dir / packing_name
@@ -293,7 +305,12 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         )
         amazon_template_path = await asyncio.get_running_loop().run_in_executor(
             None,
-            partial(self._build_amazon_template, pending.merge_dir, result, pinxiang_config.AMAZON_TEMPLATE_MPL),
+            partial(
+                self._build_amazon_template,
+                pending.merge_dir,
+                result,
+                pinxiang_config.amazon_template_mpl(result.country or ""),
+            ),
         )
 
         pending.packing_result_path = packing_path
@@ -382,13 +399,14 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 pending.shipment_path,
             ),
         )
+        country = pending.country or getattr(packing_result, "country", "") or ""
         template_path = await asyncio.get_running_loop().run_in_executor(
             None,
             partial(
                 self._build_amazon_template,
                 pending.merge_dir,
                 packing_result,
-                pinxiang_config.AMAZON_TEMPLATE_MPL,
+                pinxiang_config.amazon_template_mpl(country),
             ),
         )
         pending.amazon_template_path = template_path
@@ -656,7 +674,12 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         )
         amazon_template_path = await asyncio.get_running_loop().run_in_executor(
             None,
-            partial(self._build_amazon_template, job_dir, result, pinxiang_config.AMAZON_TEMPLATE_MPL),
+            partial(
+                self._build_amazon_template,
+                job_dir,
+                result,
+                pinxiang_config.amazon_template_mpl(result.country or ""),
+            ),
         )
 
         keys = self._result_shipment_keys(result, packing_name)
@@ -772,7 +795,13 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
 
         await asyncio.get_running_loop().run_in_executor(
             None,
-            partial(fill_amazon_packaging_file, amazon_file.path, rows, out_path),
+            partial(
+                fill_amazon_packaging_file,
+                amazon_file.path,
+                rows,
+                out_path,
+                country=job.country or "",
+            ),
         )
 
         await self._send_file(
@@ -824,6 +853,11 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         else:
             raise MessageFormatError("当前没有进行中的拼箱任务，无法生成模板2。")
 
+        country = ""
+        if pending_log is not None:
+            country = pending_log.country or ""
+        elif pending_ops is not None:
+            country = pending_ops.country or ""
         await self._send_text(user_id, "正在按当前模板1数据生成 Amazon 模板2（仅换格式），请稍等…")
         template_path = await asyncio.get_running_loop().run_in_executor(
             None,
@@ -833,6 +867,7 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 packing_path,
                 shipment_path,
                 existing_tpl,
+                country,
             ),
         )
         if target == "logistics" and pending_log is not None:
@@ -870,27 +905,33 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         packing_path: Path,
         shipment_path: Path,
         existing_template: Optional[Path],
+        country: str = "",
     ) -> Path:
-        """优先从已发模板1拷数据到 MPL2；否则用拼箱 Amazon全量 / 发货单重算。"""
-        mpl2 = Path(pinxiang_config.AMAZON_TEMPLATE_MPL2)
-        if not mpl2.is_file():
-            raise MessageFormatError(f"Amazon 模板2不存在：{mpl2}")
-        out_path = Path(job_dir) / mpl2.name
+        """优先从已发模板1拷数据到 MPL2/MPL3；否则用拼箱结果重算。"""
+        packing_result = None
+        country = (country or "").strip()
+        if not country:
+            packing_result = self._load_packing_result_for_template(packing_path, shipment_path)
+            country = getattr(packing_result, "country", "") or ""
+        shell = Path(pinxiang_config.amazon_template_mpl2(country))
+        if not shell.is_file():
+            raise MessageFormatError(f"Amazon 模板2不存在：{shell}")
+        out_path = Path(job_dir) / shell.name
         existing = Path(existing_template) if existing_template else None
         # 已有填好的模板1（或上次模板2）：只换壳，数据原样
         if existing is not None and existing.is_file() and existing.resolve() != out_path.resolve():
             reformat_amazon_workbook(
                 data_source=existing,
-                template_source=mpl2,
+                template_source=shell,
                 output_path=out_path,
             )
             return out_path
         if existing is not None and existing.is_file() and existing.resolve() == out_path.resolve():
-            # 已是 MPL2 路径，数据已在；直接返回
             return existing
-        packing_result = self._load_packing_result_for_template(packing_path, shipment_path)
+        if packing_result is None:
+            packing_result = self._load_packing_result_for_template(packing_path, shipment_path)
         create_amazon_workbook(
-            template_source=mpl2,
+            template_source=shell,
             output_path=out_path,
             result=packing_result,
         )

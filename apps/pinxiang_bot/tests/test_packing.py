@@ -15,12 +15,18 @@ if str(APP_DIR) not in sys.path:
 
 from packing import (  # noqa: E402
     LineItem,
+    TEMPLATE1_SHEET,
     compute_packing,
+    load_packing_result_workbook,
     process_shipment_file,
     write_packing_workbook,
 )
 
 SAMPLE_SHIPMENT = Path("/Users/kerden/Desktop/不分仓拼箱/参考表格/发货单-938438362569883648.xlsx")
+TEST_SHIPMENT = Path("/Users/kerden/Desktop/测试数据/发货单-943520755484897280.xlsx")
+TEST_EXPECTED = Path(
+    "/Users/kerden/Desktop/测试数据/SP260805013 SP260805012 SP260805011 SP260805008 拼箱数据.xlsx"
+)
 
 
 def _item(**kwargs) -> LineItem:
@@ -218,6 +224,71 @@ class PackingLogicTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = write_packing_workbook(result, Path(tmp) / "out.xlsx")
             self.assertTrue(out.is_file())
+
+    def test_template1_sheet_full_before_partial(self):
+        result = compute_packing(
+            [
+                _item(sku="FULL", qty=100, units_per_box=20, box_weight_kg=10),
+                _item(sku="PART", qty=5, units_per_box=20, box_weight_kg=10),
+            ]
+        )
+        from packing import _build_template1_rows
+
+        items = [
+            _item(sku="FULL", qty=100, units_per_box=20, box_weight_kg=10, length_cm=40, width_cm=30, height_cm=20),
+            _item(sku="PART", qty=5, units_per_box=20, box_weight_kg=10, length_cm=40, width_cm=30, height_cm=20),
+        ]
+        t1 = _build_template1_rows(items, "美国")
+        self.assertEqual([r.sku for r in t1], ["FULL", "PART"])
+        self.assertTrue(t1[0].is_full_box)
+        self.assertFalse(t1[1].is_full_box)
+        self.assertEqual(t1[0].box_count, 5)
+        self.assertIsNone(t1[1].units_per_box)
+
+        result.country = "美国"
+        result.template1_rows = t1
+        with tempfile.TemporaryDirectory() as tmp:
+            out = write_packing_workbook(result, Path(tmp) / "out.xlsx")
+            loaded = load_packing_result_workbook(out)
+            self.assertEqual(len(loaded.template1_rows), 2)
+            self.assertEqual(loaded.template1_rows[0].sku, "FULL")
+            self.assertTrue(loaded.template1_rows[0].is_full_box)
+            self.assertEqual(loaded.template1_rows[1].sku, "PART")
+            self.assertFalse(loaded.template1_rows[1].is_full_box)
+            from openpyxl import load_workbook
+
+            wb = load_workbook(out, data_only=True)
+            self.assertIn(TEMPLATE1_SHEET, wb.sheetnames)
+            ws = wb[TEMPLATE1_SHEET]
+            self.assertEqual(ws.cell(2, 1).value, "是")
+            self.assertEqual(ws.cell(3, 1).value, "否")
+            self.assertIsNone(ws.cell(3, 5).value)
+            wb.close()
+
+    @unittest.skipUnless(
+        TEST_SHIPMENT.is_file() and TEST_EXPECTED.is_file(),
+        "desktop test fixtures not on this machine",
+    )
+    def test_template1_matches_desktop_sample(self):
+        result = process_shipment_file(TEST_SHIPMENT)
+        self.assertEqual(len(result.template1_rows), 33)
+        full = [r for r in result.template1_rows if r.is_full_box]
+        partial = [r for r in result.template1_rows if not r.is_full_box]
+        self.assertEqual(len(full), 21)
+        self.assertEqual(len(partial), 12)
+        # 整箱在前、非整箱在后
+        self.assertTrue(all(r.is_full_box for r in result.template1_rows[:21]))
+        self.assertTrue(all(not r.is_full_box for r in result.template1_rows[21:]))
+        from openpyxl import load_workbook
+
+        exp = load_workbook(TEST_EXPECTED, data_only=True)[TEMPLATE1_SHEET]
+        got_skus = [(r.is_full_box, r.sku, r.qty) for r in result.template1_rows]
+        exp_skus = []
+        for row in exp.iter_rows(min_row=2, values_only=True):
+            if not row or not row[2]:
+                continue
+            exp_skus.append((row[0] == "是", str(row[2]), float(row[3])))
+        self.assertEqual(got_skus, exp_skus)
 
 
 if __name__ == "__main__":
