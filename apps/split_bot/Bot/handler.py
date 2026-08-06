@@ -179,7 +179,9 @@ class PdfSplitBotHandler(dingtalk_stream.ChatbotHandler):
             download_url = self.get_image_download_url(code)
             if not download_url:
                 continue
-            response = requests.get(download_url, timeout=60, trust_env=False)
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.get(download_url, timeout=60)
             response.raise_for_status()
             file_name = file_names.get(code) or _infer_filename(response.headers, f"attachment-{index}")
             suffix = Path(file_name).suffix.lower()
