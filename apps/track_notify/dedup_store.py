@@ -3,8 +3,23 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+CST = timezone(timedelta(hours=8))
+
+
+def _utc_sqlite_to_cst_ymd(raw: str) -> str:
+    """sqlite datetime('now') is UTC 'YYYY-MM-DD HH:MM:SS' → Asia/Shanghai calendar day."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    try:
+        utc_dt = datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return utc_dt.astimezone(CST).strftime("%Y-%m-%d")
+    except ValueError:
+        return text[:10]
 
 
 class TrackStateStore:
@@ -139,6 +154,28 @@ class TrackStateStore:
             if isinstance(data, dict):
                 out.append(data)
         return out
+
+    def discard_pending_if_stale(self, today_ymd: str) -> int:
+        """
+        跨日丢弃 pending：仅同一业务日（Asia/Shanghai YYYY-MM-DD）可恢复。
+        返回丢弃条数；0 表示无 pending 或仍属今日。
+        """
+        day = (today_ymd or "").strip()
+        if not day:
+            return 0
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*), MAX(updated_at) FROM pending_report_items"
+            ).fetchone()
+            count = int(row[0] or 0) if row else 0
+            if count <= 0:
+                return 0
+            pending_day = _utc_sqlite_to_cst_ymd(str(row[1] or ""))
+            if pending_day == day:
+                return 0
+            self._conn.execute("DELETE FROM pending_report_items")
+            self._conn.commit()
+            return count
 
     def clear_pending_for(self, pairs: list[tuple[str, str]]) -> None:
         if not pairs:

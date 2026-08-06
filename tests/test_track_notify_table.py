@@ -15,6 +15,57 @@ from dedup_store import TrackStateStore  # noqa: E402
 from dingtalk_table import TableRow, _split_codes, _ts_to_date  # noqa: E402
 
 
+class DingTalkRequestRetryTests(unittest.TestCase):
+    def test_request_retries_urlerror_then_ok(self):
+        import urllib.error
+        from unittest.mock import MagicMock, patch
+
+        from dingtalk_table import DingTalkNotableClient
+
+        client = DingTalkNotableClient(
+            "k",
+            "s",
+            operator_union_id="op",
+            max_retries=3,
+            timeout_sec=1,
+        )
+        ok_resp = MagicMock()
+        ok_resp.read.return_value = b'{"records":[]}'
+        ok_resp.__enter__.return_value = ok_resp
+        ok_resp.__exit__.return_value = False
+        side_effects = [
+            urllib.error.URLError("ssl timeout"),
+            ok_resp,
+        ]
+        with patch("dingtalk_table.urllib.request.urlopen", side_effect=side_effects) as m:
+            with patch("dingtalk_table.time.sleep"):
+                data = client._request("POST", "https://example.test/x", {}, auth=False)
+        self.assertEqual(data, {"records": []})
+        self.assertEqual(m.call_count, 2)
+
+    def test_request_exhausts_retries(self):
+        import urllib.error
+        from unittest.mock import patch
+
+        from dingtalk_table import DingTalkNotableClient
+
+        client = DingTalkNotableClient(
+            "k",
+            "s",
+            operator_union_id="op",
+            max_retries=2,
+            timeout_sec=1,
+        )
+        with patch(
+            "dingtalk_table.urllib.request.urlopen",
+            side_effect=urllib.error.URLError("ssl timeout"),
+        ):
+            with patch("dingtalk_table.time.sleep"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    client._request("POST", "https://example.test/x", {}, auth=False)
+        self.assertIn("after 2 tries", str(ctx.exception))
+
+
 class HelpersTests(unittest.TestCase):
     def test_split_codes(self):
         self.assertEqual(

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import socket
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -10,6 +14,16 @@ from typing import Any
 
 
 CST = timezone(timedelta(hours=8))
+_log = logging.getLogger("track_notify")
+
+# 瞬态网络/SSL：重试后仍失败再抛
+_RETRYABLE = (
+    TimeoutError,
+    socket.timeout,
+    ssl.SSLError,
+    ConnectionError,
+    urllib.error.URLError,
+)
 
 
 @dataclass
@@ -99,7 +113,8 @@ class DingTalkNotableClient:
         *,
         operator_union_id: str,
         api_base_url: str = "https://api.dingtalk.com",
-        timeout_sec: float = 30,
+        timeout_sec: float = 60,
+        max_retries: int = 4,
     ) -> None:
         if not app_key or not app_secret:
             raise ValueError("dingtalk app key/secret required")
@@ -110,12 +125,11 @@ class DingTalkNotableClient:
         self.operator_union_id = operator_union_id
         self.api_base_url = api_base_url.rstrip("/")
         self.timeout_sec = timeout_sec
+        self.max_retries = max(1, max_retries)
         self._token: str | None = None
         self._token_expire_at = 0.0
 
     def get_access_token(self) -> str:
-        import time
-
         now = time.time()
         if self._token and now < self._token_expire_at - 60:
             return self._token
@@ -141,19 +155,49 @@ class DingTalkNotableClient:
         if auth:
             headers["x-acs-dingtalk-access-token"] = self.get_access_token()
         raw = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=raw, method=method, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"dingtalk HTTP {exc.code}: {detail}") from exc
-        if not text:
-            return {}
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise RuntimeError(f"unexpected response: {type(data)}")
-        return data
+        last_exc: BaseException | None = None
+        for attempt in range(1, self.max_retries + 1):
+            req = urllib.request.Request(url, data=raw, method=method, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                    text = resp.read().decode("utf-8", errors="replace")
+                if not text:
+                    return {}
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"unexpected response: {type(data)}")
+                return data
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                # 5xx / 429 可重试；4xx 直接失败
+                if exc.code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
+                    sleep_sec = min(30.0, 2.0 ** attempt)
+                    _log.warning(
+                        "dingtalk HTTP %s retry %s/%s sleep=%.0fs: %s",
+                        exc.code,
+                        attempt,
+                        self.max_retries,
+                        sleep_sec,
+                        detail[:200],
+                    )
+                    time.sleep(sleep_sec)
+                    last_exc = exc
+                    continue
+                raise RuntimeError(f"dingtalk HTTP {exc.code}: {detail}") from exc
+            except _RETRYABLE as exc:
+                last_exc = exc
+                if attempt >= self.max_retries:
+                    break
+                sleep_sec = min(30.0, 2.0 ** attempt)
+                _log.warning(
+                    "dingtalk network retry %s/%s sleep=%.0fs: %s",
+                    attempt,
+                    self.max_retries,
+                    sleep_sec,
+                    exc,
+                )
+                time.sleep(sleep_sec)
+        raise RuntimeError(f"dingtalk request failed after {self.max_retries} tries: {last_exc}") from last_exc
 
     def list_all_records(self, doc_key: str, sheet_id: str, view_id: str = "") -> list[dict[str, Any]]:
         op = urllib.parse.quote(self.operator_union_id)

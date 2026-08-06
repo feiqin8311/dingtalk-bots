@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -22,12 +23,31 @@ if str(ROOT_DIR) not in sys.path:
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+import os
+
 from dedup_store import TrackStateStore
 from milestones import match_milestone
 from pingyi_client import PingyiClient
 from runner import run_once
 from settings import load_config_from_env
 from shared.logging import setup_logger
+
+
+def _acquire_once_lock(state_dir: Path):
+    """同一 state_dir 同时只允许一个 --once；失败返回 None。"""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = state_dir / "run_once.lock"
+    fh = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"pid={os.getpid()} at={datetime.now(tz=CST).isoformat()}\n")
+    fh.flush()
+    return fh
 
 CST = timezone(timedelta(hours=8))
 # Mon=0 ... Sun=6；周一、周三 00:00（AGL 慢，夜里慢慢查）
@@ -150,11 +170,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.once:
-        setup_logger("%(asctime)s %(name)s %(levelname)-8s %(message)s", "INFO")
+        logger = setup_logger("%(asctime)s %(name)s %(levelname)-8s %(message)s", "INFO")
         config = load_config_from_env()
-        stats = run_once(config, dry_run=args.dry_run)
-        print(stats)
-        return 0
+        lock_fh = None if args.dry_run else _acquire_once_lock(config.state_dir)
+        if not args.dry_run and lock_fh is None:
+            logger.error("another --once is already running (lock %s)", config.state_dir / "run_once.lock")
+            return 2
+        try:
+            stats = run_once(config, dry_run=args.dry_run)
+            print(stats)
+            return 0
+        finally:
+            if lock_fh is not None:
+                try:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                finally:
+                    lock_fh.close()
 
     if not args.numbers:
         parser.error("provide --daemon, --once, or at least one FBA/tracking number")
