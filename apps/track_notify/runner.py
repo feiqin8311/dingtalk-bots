@@ -758,6 +758,15 @@ def _process_row(
     return 0, False, []
 
 
+def _mark_and_clear_items(store: TrackStateStore, items: list[ReportItem]) -> None:
+    cleared: list[tuple[str, str]] = []
+    for item in items:
+        for ek in item.keys_to_mark():
+            store.mark_event(item.shipment_key, ek, item.message)
+        cleared.append((item.shipment_key, item.event_key))
+    store.clear_pending_for(cleared)
+
+
 def _deliver_excel_reports(
     items: list[ReportItem],
     *,
@@ -766,7 +775,13 @@ def _deliver_excel_reports(
     dry_run: bool,
     logger: logging.Logger,
 ) -> dict[str, int]:
-    stats = {"excel_rows": len(items), "excel_files": 0, "excel_sent": 0, "excel_failed": 0}
+    stats = {
+        "excel_rows": len(items),
+        "excel_files": 0,
+        "excel_sent": 0,
+        "excel_failed": 0,
+        "excel_mark_deferred": 0,
+    }
     if not items:
         return stats
 
@@ -788,12 +803,7 @@ def _deliver_excel_reports(
         stats["excel_files"] += 1
         logger.warning("excel for no-owner rows path=%s rows=%s", path, len(no_owner))
         if not dry_run:
-            cleared_no: list[tuple[str, str]] = []
-            for item in no_owner:
-                for ek in item.keys_to_mark():
-                    store.mark_event(item.shipment_key, ek, item.message)
-                cleared_no.append((item.shipment_key, item.event_key))
-            store.clear_pending_for(cleared_no)
+            _mark_and_clear_items(store, no_owner)
 
     # 先写盘，再发钉钉：发送侧 import 失败时也要有 Excel 可查
     prepared: list[tuple[str, Path, list[ReportItem]]] = []
@@ -811,61 +821,78 @@ def _deliver_excel_reports(
         stats["excel_files"] += 1
         prepared.append((user_id, path, unique))
 
-    notifier = None
-    if not dry_run and config.send_excel:
-        if not config.ding_client_id or not config.ding_client_secret or not config.ding_robot_code:
-            logger.error("missing ding credentials/robot_code, cannot send excel")
-        else:
-            try:
-                # cp_bot.api.config 依赖 apps/cp_bot 在 sys.path（独立子进程无 logistics 环境）
-                cp_dir = str(ROOT_DIR / "apps" / "cp_bot")
-                if cp_dir not in sys.path:
-                    sys.path.insert(0, cp_dir)
-                from api.dingtalk_client import DingTalkNotifier  # noqa: WPS433
-
-                notifier = DingTalkNotifier(
-                    app_key=config.ding_client_id,
-                    app_secret=config.ding_client_secret,
-                    robot_code=config.ding_robot_code,
-                )
-            except Exception:
-                logger.exception("DingTalkNotifier import/init failed")
-
-    for user_id, path, unique in prepared:
-        if dry_run:
+    if dry_run:
+        for user_id, path, unique in prepared:
             logger.info("[dry-run] excel owner=%s path=%s rows=%s", user_id, path, len(unique))
-            continue
-        if not config.send_excel:
+        return stats
+
+    if not config.send_excel:
+        for user_id, path, unique in prepared:
             logger.info(
                 "[excel-only] owner=%s path=%s rows=%s (TRACK_SEND_EXCEL off)",
                 user_id,
                 path,
                 len(unique),
             )
-            cleared: list[tuple[str, str]] = []
-            for item in unique:
-                for ek in item.keys_to_mark():
-                    store.mark_event(item.shipment_key, ek, item.message)
-                cleared.append((item.shipment_key, item.event_key))
-            store.clear_pending_for(cleared)
-            continue
+            _mark_and_clear_items(store, unique)
+        return stats
+
+    notifier = None
+    if not config.ding_client_id or not config.ding_client_secret or not config.ding_robot_code:
+        logger.error("missing ding credentials/robot_code, cannot send excel")
+    else:
+        try:
+            # cp_bot.api.config 依赖 apps/cp_bot 在 sys.path（独立子进程无 logistics 环境）
+            cp_dir = str(ROOT_DIR / "apps" / "cp_bot")
+            if cp_dir not in sys.path:
+                sys.path.insert(0, cp_dir)
+            from api.dingtalk_client import DingTalkNotifier  # noqa: WPS433
+
+            notifier = DingTalkNotifier(
+                app_key=config.ding_client_id,
+                app_secret=config.ding_client_secret,
+                robot_code=config.ding_robot_code,
+            )
+        except Exception:
+            logger.exception("DingTalkNotifier import/init failed")
+
+    # 先发完全部收件人，再按 item 统一 mark：任一收件人失败则该行不 mark，下次可重推
+    success_users: set[str] = set()
+    for user_id, path, unique in prepared:
         if notifier is None:
             stats["excel_failed"] += 1
             logger.error("excel not sent owner=%s path=%s (notifier unavailable)", user_id, path)
             continue
         try:
             notifier.send_user_file(user_id, str(path))
+            success_users.add(user_id)
             stats["excel_sent"] += 1
             logger.info("excel sent owner=%s path=%s rows=%s", user_id, path, len(unique))
-            cleared = []
-            for item in unique:
-                for ek in item.keys_to_mark():
-                    store.mark_event(item.shipment_key, ek, item.message)
-                cleared.append((item.shipment_key, item.event_key))
-            store.clear_pending_for(cleared)
         except Exception as exc:
             stats["excel_failed"] += 1
             logger.exception("excel send failed owner=%s: %s", user_id, exc)
+
+    by_key: dict[tuple[str, str], ReportItem] = {}
+    for item in items:
+        if not item.user_ids:
+            continue
+        by_key[(item.shipment_key, item.event_key)] = item
+
+    to_mark: list[ReportItem] = []
+    for item in by_key.values():
+        needed = set(item.user_ids)
+        if needed and needed.issubset(success_users):
+            to_mark.append(item)
+        else:
+            stats["excel_mark_deferred"] += 1
+            logger.warning(
+                "defer mark shipment=%s event=%s missing_recipients=%s",
+                item.shipment_key,
+                item.event_key,
+                sorted(needed - success_users),
+            )
+    if to_mark:
+        _mark_and_clear_items(store, to_mark)
 
     return stats
 

@@ -107,5 +107,95 @@ class PendingCheckpointTests(unittest.TestCase):
         self.assertEqual(_utc_sqlite_to_cst_ymd("2026-08-05 15:59:00"), "2026-08-05")
 
 
+class ScheduleAndDeliverTests(unittest.TestCase):
+    def test_next_run_at_mon_wed_0700_and_catchup(self):
+        from main import SCHEDULE_HOUR, _next_run_at
+
+        self.assertEqual(SCHEDULE_HOUR, 7)
+        mon_before = datetime(2026, 8, 3, 6, 59, 0, tzinfo=CST)
+        self.assertEqual(
+            _next_run_at(mon_before, last_run_ymd=None),
+            datetime(2026, 8, 3, 7, 0, 0, tzinfo=CST),
+        )
+        mon_late = datetime(2026, 8, 3, 7, 5, 0, tzinfo=CST)
+        self.assertEqual(_next_run_at(mon_late, last_run_ymd=None), mon_late)
+        self.assertEqual(
+            _next_run_at(mon_late, last_run_ymd="2026-08-03"),
+            datetime(2026, 8, 5, 7, 0, 0, tzinfo=CST),
+        )
+
+    def test_deliver_defers_mark_until_all_recipients_ok(self):
+        from unittest.mock import MagicMock
+
+        from runner import _deliver_excel_reports
+        from settings import TrackNotifyConfig
+
+        def _cfg(state_dir: Path) -> TrackNotifyConfig:
+            return TrackNotifyConfig(
+                pingyi_base_url="",
+                pingyi_app_token="",
+                pingyi_app_key="",
+                pingyi_timeout_sec=60.0,
+                pingyi_retries=1,
+                gateway_base_url="",
+                gateway_api_key="",
+                gateway_timeout_sec=60.0,
+                gateway_max_concurrent=1,
+                gateway_min_interval_sec=0.0,
+                dingtalk_doc_key="x",
+                dingtalk_sheet_id="x",
+                dingtalk_view_id="x",
+                operator_union_id="x",
+                ding_client_id="k",
+                ding_client_secret="s",
+                ding_robot_code="r",
+                carrier_keywords=("平谊", "龙舟"),
+                ship_year=2026,
+                state_dir=state_dir,
+                query_workers=1,
+                send_excel=True,
+            )
+
+        def _install_notifier(notifier: MagicMock) -> None:
+            fake_mod = MagicMock()
+            fake_mod.DingTalkNotifier = MagicMock(return_value=notifier)
+            sys.modules["api"] = type(sys)("api")
+            sys.modules["api.dingtalk_client"] = fake_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            store = TrackStateStore(state_dir / "t.sqlite3")
+            item = ReportItem(
+                shipment_key="AL0-1",
+                event_key="lz:pod",
+                message="m",
+                user_ids=["u1", "u2"],
+                detail="已到达卸货港",
+                event_keys=["lz:pod"],
+            )
+            config = _cfg(state_dir)
+
+            notifier = MagicMock()
+            notifier.send_user_file.side_effect = lambda uid, _p: (
+                (_ for _ in ()).throw(RuntimeError("send fail")) if uid == "u2" else None
+            )
+            _install_notifier(notifier)
+            stats = _deliver_excel_reports(
+                [item], config=config, store=store, dry_run=False, logger=MagicMock()
+            )
+            self.assertGreaterEqual(stats["excel_failed"], 1)
+            self.assertEqual(stats["excel_mark_deferred"], 1)
+            self.assertFalse(store.has_event("AL0-1", "lz:pod"))
+
+            _install_notifier(MagicMock())
+            stats2 = _deliver_excel_reports(
+                [item], config=config, store=store, dry_run=False, logger=MagicMock()
+            )
+            self.assertEqual(stats2["excel_sent"], 2)
+            self.assertEqual(stats2["excel_mark_deferred"], 0)
+            self.assertTrue(store.has_event("AL0-1", "lz:pod"))
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

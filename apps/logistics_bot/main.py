@@ -28,7 +28,7 @@ from shared.logging import setup_logger
 
 
 def _start_track_notify_daemon(logger) -> None:
-    """Mon/Wed 00:00 轨迹查询：子进程跑，避免与 logistics_bot 的 settings 模块名冲突。"""
+    """Mon/Wed 07:00 轨迹查询：子进程跑，避免与 logistics_bot 的 settings 模块名冲突。"""
     import subprocess
 
     track_main_path = ROOT_DIR / "apps" / "track_notify" / "main.py"
@@ -49,7 +49,7 @@ def _start_track_notify_daemon(logger) -> None:
             logger.exception("track_notify daemon crashed")
 
     threading.Thread(target=_target, name="track-notify", daemon=True).start()
-    logger.info("track_notify subprocess scheduler started (Mon/Wed 00:00 Asia/Shanghai)")
+    logger.info("track_notify subprocess scheduler started (Mon/Wed 07:00 Asia/Shanghai)")
 
 
 class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):

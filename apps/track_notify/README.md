@@ -2,7 +2,7 @@
 
 ## 规则（业务文档）
 
-1. **调度**：周一、周三 **00:00**（Asia/Shanghai）
+1. **调度**：周一、周三 **07:00**（Asia/Shanghai）；若启动时已过点且当日未成功跑过会补跑
 2. **筛选**：`2025New！`  
    - **发货时间** 年份 = 2026（列值为毫秒时间戳，如 `1779033600000`）  
    - 货代含「平谊」或「龙舟」  
@@ -46,7 +46,7 @@ python3 apps/track_notify/main.py FBA19JTBN929 --dry-run
 
 ## 调度
 
-挂在 `apps/logistics_bot/main.py` 后台线程，Mon/Wed 00:00。
+挂在 `apps/logistics_bot/main.py` 后台线程，Mon/Wed 07:00。
 
 ## 配置
 

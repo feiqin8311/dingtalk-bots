@@ -33,8 +33,8 @@ from settings import load_config_from_env
 from shared.logging import setup_logger
 
 
-def _acquire_once_lock(state_dir: Path):
-    """同一 state_dir 同时只允许一个 --once；失败返回 None。"""
+def _acquire_run_lock(state_dir: Path):
+    """同一 state_dir 同时只允许一个 run（--once / daemon 共用）；失败返回 None。"""
     state_dir.mkdir(parents=True, exist_ok=True)
     lock_path = state_dir / "run_once.lock"
     fh = open(lock_path, "a+", encoding="utf-8")
@@ -49,10 +49,33 @@ def _acquire_once_lock(state_dir: Path):
     fh.flush()
     return fh
 
+
+def _release_run_lock(lock_fh) -> None:
+    if lock_fh is None:
+        return
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_fh.close()
+
+
+def _load_last_run_ymd(state_dir: Path) -> str | None:
+    path = state_dir / "last_scheduled_run.ymd"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8").strip()[:10]
+    return text or None
+
+
+def _save_last_run_ymd(state_dir: Path, ymd: str) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "last_scheduled_run.ymd").write_text(f"{ymd}\n", encoding="utf-8")
+
+
 CST = timezone(timedelta(hours=8))
-# Mon=0 ... Sun=6；周一、周三 00:00（AGL 慢，夜里慢慢查）
+# Mon=0 ... Sun=6；周一、周三 07:00 Asia/Shanghai
 SCHEDULE_WEEKDAYS = frozenset({0, 2})
-SCHEDULE_HOUR = 0
+SCHEDULE_HOUR = 7
 SCHEDULE_MINUTE = 0
 
 
@@ -105,16 +128,32 @@ def query_numbers(numbers: list[str], *, dry_run: bool) -> int:
     return notified
 
 
-def _next_run_at(now: datetime | None = None) -> datetime:
+def _next_run_at(
+    now: datetime | None = None,
+    *,
+    last_run_ymd: str | None = None,
+) -> datetime:
+    """
+    下一调度点。若今天是 Mon/Wed、已过 07:00、且今天尚未成功跑过 → 立即（catch-up）。
+    """
     now = now or datetime.now(tz=CST)
-    candidate = now.replace(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, second=0, microsecond=0)
+    today_ymd = now.strftime("%Y-%m-%d")
+    today_slot = now.replace(
+        hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, second=0, microsecond=0
+    )
+    if (
+        now.weekday() in SCHEDULE_WEEKDAYS
+        and now >= today_slot
+        and last_run_ymd != today_ymd
+    ):
+        return now
     for offset in range(0, 8):
-        day = candidate + timedelta(days=offset)
+        day = today_slot + timedelta(days=offset)
         if day.weekday() not in SCHEDULE_WEEKDAYS:
             continue
         if day > now:
             return day
-    return candidate + timedelta(days=7)
+    return today_slot + timedelta(days=7)
 
 
 def run_daemon(*, dry_run: bool = False) -> None:
@@ -125,20 +164,40 @@ def run_daemon(*, dry_run: bool = False) -> None:
         SCHEDULE_MINUTE,
         dry_run,
     )
+    boot_config = load_config_from_env()
+    last_run_ymd = None if dry_run else _load_last_run_ymd(boot_config.state_dir)
     while True:
-        target = _next_run_at()
+        target = _next_run_at(last_run_ymd=last_run_ymd)
         sleep_sec = max(1.0, (target - datetime.now(tz=CST)).total_seconds())
-        logger.info("next run at %s (sleep %.0fs)", target.isoformat(timespec="seconds"), sleep_sec)
+        logger.info(
+            "next run at %s (sleep %.0fs) last_ok=%s",
+            target.isoformat(timespec="seconds"),
+            sleep_sec,
+            last_run_ymd or "-",
+        )
         # wake periodically so container stop is responsive
         deadline = time.monotonic() + sleep_sec
         while time.monotonic() < deadline:
             time.sleep(min(60.0, deadline - time.monotonic()))
+        config = load_config_from_env()
+        lock_fh = None if dry_run else _acquire_run_lock(config.state_dir)
+        if not dry_run and lock_fh is None:
+            logger.warning(
+                "skip scheduled run: another run holds lock %s",
+                config.state_dir / "run_once.lock",
+            )
+            time.sleep(61)
+            continue
         try:
-            config = load_config_from_env()
             stats = run_once(config, dry_run=dry_run)
+            last_run_ymd = datetime.now(tz=CST).strftime("%Y-%m-%d")
+            if not dry_run:
+                _save_last_run_ymd(config.state_dir, last_run_ymd)
             logger.info("scheduled run done %s", stats)
         except Exception:
             logger.exception("scheduled run failed")
+        finally:
+            _release_run_lock(lock_fh)
         # avoid double-fire if clock jumps backward within the same minute
         time.sleep(61)
 
@@ -160,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--daemon",
         action="store_true",
-        help="stay running; run on Mon/Wed 00:00 Asia/Shanghai",
+        help="stay running; run on Mon/Wed 07:00 Asia/Shanghai",
     )
     parser.add_argument("--dry-run", action="store_true", help="do not write state or notify")
     args = parser.parse_args(argv)
@@ -172,20 +231,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         logger = setup_logger("%(asctime)s %(name)s %(levelname)-8s %(message)s", "INFO")
         config = load_config_from_env()
-        lock_fh = None if args.dry_run else _acquire_once_lock(config.state_dir)
+        lock_fh = None if args.dry_run else _acquire_run_lock(config.state_dir)
         if not args.dry_run and lock_fh is None:
-            logger.error("another --once is already running (lock %s)", config.state_dir / "run_once.lock")
+            logger.error(
+                "another run is already running (lock %s)",
+                config.state_dir / "run_once.lock",
+            )
             return 2
         try:
             stats = run_once(config, dry_run=args.dry_run)
             print(stats)
             return 0
         finally:
-            if lock_fh is not None:
-                try:
-                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-                finally:
-                    lock_fh.close()
+            _release_run_lock(lock_fh)
 
     if not args.numbers:
         parser.error("provide --daemon, --once, or at least one FBA/tracking number")
