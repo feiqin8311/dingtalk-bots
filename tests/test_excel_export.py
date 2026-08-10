@@ -14,10 +14,13 @@ if str(APP) not in sys.path:
 from excel_export import (  # noqa: E402
     HEADERS,
     ReportItem,
+    detail_line_has_date,
     export_filename,
+    filter_report_item_for_user,
     format_shipped_at,
     write_report_xlsx,
 )
+from owners import KEPENGXIANG_USER_ID  # noqa: E402
 from openpyxl import load_workbook  # noqa: E402
 from datetime import datetime  # noqa: E402
 
@@ -144,6 +147,58 @@ class ExcelExportTests(unittest.TestCase):
             self.assertEqual(ws.max_row, 2)
             self.assertEqual(ws["K2"].value, detail)
             self.assertTrue(ws["K2"].alignment.wrap_text)
+
+    def test_detail_line_has_date(self):
+        self.assertTrue(detail_line_has_date("2026-07-29 出发地 中国宁波"))
+        self.assertFalse(detail_line_has_date("已到达卸货港"))
+        self.assertFalse(detail_line_has_date("已提柜"))
+        self.assertFalse(detail_line_has_date("货物已送达 FC 场地"))
+
+    def test_filter_undated_for_logistics_keep_full_for_kpx(self):
+        detail = (
+            "2026-07-29 出发地 中国宁波\n"
+            "已到达卸货港\n"
+            "已提柜\n"
+            "货物已送达 FC 场地"
+        )
+        item = ReportItem(
+            shipment_key="AL0",
+            event_key="lz:ningbo",
+            message="AL0 节点4条",
+            user_ids=["17409662804279906", KEPENGXIANG_USER_ID],
+            detail=detail,
+            event_keys=["lz:ningbo", "lz:pod", "lz:pickup", "lz:fc"],
+        )
+        logistics = filter_report_item_for_user(
+            item, "17409662804279906", full_detail_user_id=KEPENGXIANG_USER_ID
+        )
+        assert logistics is not None
+        self.assertEqual(logistics.detail, "2026-07-29 出发地 中国宁波")
+        kpx = filter_report_item_for_user(
+            item, KEPENGXIANG_USER_ID, full_detail_user_id=KEPENGXIANG_USER_ID
+        )
+        assert kpx is not None
+        self.assertEqual(kpx.detail, detail)
+
+    def test_filter_all_undated_omit_logistics(self):
+        item = ReportItem(
+            shipment_key="AL0",
+            event_key="lz:pod",
+            message="x",
+            user_ids=["u1", KEPENGXIANG_USER_ID],
+            detail="已到达卸货港\n已提柜",
+            event_keys=["lz:pod", "lz:pickup"],
+        )
+        self.assertIsNone(
+            filter_report_item_for_user(
+                item, "u1", full_detail_user_id=KEPENGXIANG_USER_ID
+            )
+        )
+        kpx = filter_report_item_for_user(
+            item, KEPENGXIANG_USER_ID, full_detail_user_id=KEPENGXIANG_USER_ID
+        )
+        assert kpx is not None
+        self.assertEqual(kpx.detail, item.detail)
 
 
 if __name__ == "__main__":

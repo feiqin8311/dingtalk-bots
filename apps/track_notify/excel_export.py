@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Iterable
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment
+
+# 物流详情行：以 YYYY-MM-DD 开头视为「有日期」
+_DETAIL_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}\b")
 
 
 # 业务回传列（按产品要求）
@@ -65,6 +69,36 @@ class ReportItem:
 
     def keys_to_mark(self) -> list[str]:
         return list(self.event_keys) if self.event_keys else [self.event_key]
+
+
+def detail_line_has_date(line: str) -> bool:
+    return bool(_DETAIL_DATE_PREFIX.match((line or "").strip()))
+
+
+def filter_report_item_for_user(
+    item: ReportItem,
+    user_id: str,
+    *,
+    full_detail_user_id: str,
+) -> ReportItem | None:
+    """
+    物流人员：物流详情只保留「有日期」的节点行；全无日期则本行不推给该用户。
+    总览接收人（柯鹏翔）：完整详情不动。
+    返回 None 表示该用户 Excel 不写此行。
+    """
+    if (user_id or "").strip() == (full_detail_user_id or "").strip():
+        return item
+    text = (item.detail or item.message or "").strip()
+    if not text:
+        return item
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    dated = [ln.strip() for ln in lines if detail_line_has_date(ln)]
+    if not dated:
+        return None
+    if len(dated) == len(lines):
+        return item
+    new_detail = "\n".join(dated)
+    return replace(item, detail=new_detail)
 
 
 def format_shipped_at(value: date | datetime | str | None) -> str:

@@ -19,10 +19,16 @@ if str(APP_DIR) not in sys.path:
 
 from dedup_store import CST, TrackStateStore
 from dingtalk_table import DingTalkNotableClient, TableRow
-from excel_export import ReportItem, export_filename, format_shipped_at, write_report_xlsx
+from excel_export import (
+    ReportItem,
+    export_filename,
+    filter_report_item_for_user,
+    format_shipped_at,
+    write_report_xlsx,
+)
 from gateway_client import LogisticsGatewayClient
 from milestones import filter_new_milestones, milestone_label
-from owners import notify_user_ids
+from owners import KEPENGXIANG_USER_ID, notify_user_ids
 from pingyi_client import PingyiClient, TrackShipment
 from settings import TrackNotifyConfig
 
@@ -806,7 +812,10 @@ def _deliver_excel_reports(
             _mark_and_clear_items(store, no_owner)
 
     # 先写盘，再发钉钉：发送侧 import 失败时也要有 Excel 可查
+    # 物流人员：无日期节点不入其 Excel；柯鹏翔保留完整物流详情
     prepared: list[tuple[str, Path, list[ReportItem]]] = []
+    # 实际写入某人 Excel 的行 → mark 时只要求这些收件人发送成功
+    delivered_recipients: dict[tuple[str, str], set[str]] = defaultdict(set)
     for user_id, user_items in by_user.items():
         seen: set[tuple[str, str]] = set()
         unique: list[ReportItem] = []
@@ -815,7 +824,21 @@ def _deliver_excel_reports(
             if k in seen:
                 continue
             seen.add(k)
-            unique.append(it)
+            view = filter_report_item_for_user(
+                it, user_id, full_detail_user_id=KEPENGXIANG_USER_ID
+            )
+            if view is None:
+                logger.info(
+                    "omit undated-only detail for logistics user=%s shipment=%s",
+                    user_id,
+                    it.shipment_key,
+                )
+                continue
+            unique.append(view)
+            delivered_recipients[k].add(user_id)
+        if not unique:
+            logger.info("excel skip empty after date-filter owner=%s", user_id)
+            continue
         path = export_dir / export_filename(user_id=user_id, when=when)
         write_report_xlsx(unique, path)
         stats["excel_files"] += 1
@@ -834,7 +857,14 @@ def _deliver_excel_reports(
                 path,
                 len(unique),
             )
-            _mark_and_clear_items(store, unique)
+        # mark 原始 item；物流侧滤掉的无日期节点仍随柯鹏翔落盘一并 mark
+        markable = [
+            it
+            for it in items
+            if it.user_ids and (it.shipment_key, it.event_key) in delivered_recipients
+        ]
+        if markable:
+            _mark_and_clear_items(store, markable)
         return stats
 
     notifier = None
@@ -856,7 +886,7 @@ def _deliver_excel_reports(
         except Exception:
             logger.exception("DingTalkNotifier import/init failed")
 
-    # 先发完全部收件人，再按 item 统一 mark：任一收件人失败则该行不 mark，下次可重推
+    # 先发完全部收件人，再按 item 统一 mark：实际收件人失败则该行不 mark，下次可重推
     success_users: set[str] = set()
     for user_id, path, unique in prepared:
         if notifier is None:
@@ -879,9 +909,13 @@ def _deliver_excel_reports(
         by_key[(item.shipment_key, item.event_key)] = item
 
     to_mark: list[ReportItem] = []
-    for item in by_key.values():
-        needed = set(item.user_ids)
-        if needed and needed.issubset(success_users):
+    for key, item in by_key.items():
+        needed = delivered_recipients.get(key, set())
+        if not needed:
+            # 全员因「无日期」被滤掉且无总览收件人写入 — 仍 mark，避免卡死
+            to_mark.append(item)
+            continue
+        if needed.issubset(success_users):
             to_mark.append(item)
         else:
             stats["excel_mark_deferred"] += 1
