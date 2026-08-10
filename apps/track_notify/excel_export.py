@@ -131,11 +131,11 @@ def write_report_xlsx(items: Iterable[ReportItem], path: Path) -> Path:
 
 
 def export_filename(*, user_id: str = "", when: datetime | None = None) -> str:
-    """例：乔丹丹_轨迹回传_20260805.xlsx"""
+    """例：乔丹丹_轨迹回传_20260805_114336.xlsx（含时分秒，避免同日多次跑互相覆盖）。"""
     from owners import display_name
 
     when = when or datetime.now()
-    stamp = when.strftime("%Y%m%d")
+    stamp = when.strftime("%Y%m%d_%H%M%S")
     name = display_name(user_id) if user_id else "全部"
     # 去掉路径不安全字符即可
     safe = "".join("_" if c in r'\/:*?"<>|' else c for c in name).strip() or "unknown"

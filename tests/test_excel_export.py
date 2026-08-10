@@ -30,15 +30,15 @@ class ExcelExportTests(unittest.TestCase):
         when = datetime(2026, 8, 5, 11, 43, 36)
         self.assertEqual(
             export_filename(user_id="17409662804279906", when=when),
-            "乔丹丹_轨迹回传_20260805.xlsx",
+            "乔丹丹_轨迹回传_20260805_114336.xlsx",
         )
         self.assertEqual(
             export_filename(user_id="17331048354297047", when=when),
-            "柯鹏翔_轨迹回传_20260805.xlsx",
+            "柯鹏翔_轨迹回传_20260805_114336.xlsx",
         )
         self.assertEqual(
             export_filename(user_id="no_owner", when=when),
-            "无负责人_轨迹回传_20260805.xlsx",
+            "无负责人_轨迹回传_20260805_114336.xlsx",
         )
 
     def test_headers_order(self):
