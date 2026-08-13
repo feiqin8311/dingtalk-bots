@@ -57,6 +57,10 @@ class MessageFormatError(ValueError):
     pass
 
 
+class LclWorkbookHandoff(Exception):
+    """文件是分仓「拼箱计算结果」，交给 lcl 处理。"""
+
+
 @dataclass
 class DownloadedFile:
     path: Path
@@ -132,6 +136,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         try:
             async with self._job_semaphore:
                 await self._handle_message(incoming_message, user_id, callback.data)
+        except LclWorkbookHandoff:
+            return AckMessage.STATUS_OK, "HANDOFF_LCL"
         except (FileNotFoundError, MessageFormatError, ValueError) as exc:
             await self._send_text(user_id, str(exc))
         except Exception as exc:
@@ -194,6 +200,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             raise MessageFormatError(
                 "这是拼箱结果表。物流请先上传发货单；运营可直接上传拼箱结果开始任务。"
             )
+
+        if self._looks_like_lcl_packing_result(downloaded.path):
+            raise LclWorkbookHandoff()
 
         if user_id in self._pending_ops:
             raise MessageFormatError(
@@ -932,6 +941,18 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
 
             wb = load_workbook(filename=str(path), read_only=True, data_only=True)
             ok = "拼箱结果" in wb.sheetnames
+            wb.close()
+            return ok
+        except Exception:
+            return False
+
+    @staticmethod
+    def _looks_like_lcl_packing_result(path: Path) -> bool:
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+            ok = "拼箱计算结果" in wb.sheetnames
             wb.close()
             return ok
         except Exception:

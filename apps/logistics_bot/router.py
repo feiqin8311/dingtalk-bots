@@ -175,7 +175,12 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         if route == "split":
             return await self.split_handler.process(callback)
         if route == "pinxiang":
-            return await self.pinxiang_handler.process(callback)
+            status, ack = await self.pinxiang_handler.process(callback)
+            if ack == "HANDOFF_LCL":
+                if user_id:
+                    self._set_branch(user_id, "lcl")
+                return await self.lcl_handler.process(callback)
+            return status, ack
         if route == "lcl":
             return await self.lcl_handler.process(callback)
         await self._send_text(callback.data, HELP_TEXT)
@@ -284,7 +289,13 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         if user_id and getattr(self.pinxiang_handler, "has_pending", lambda _u: False)(user_id):
             return "pinxiang"
         selected = self._selected_branch_by_user.get(user_id or "")
+        lcl_pending = bool(
+            user_id and getattr(self.lcl_handler, "has_pending", lambda _u: False)(user_id)
+        )
         if selected == "pinxiang":
+            # 不分仓已结束但分支未切：分仓还有单则进 lcl（模板2 / 装箱表）
+            if lcl_pending:
+                return "lcl"
             return "pinxiang"
         if selected == "lcl":
             return "lcl"

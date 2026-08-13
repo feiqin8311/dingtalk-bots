@@ -47,6 +47,24 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
 
         # 定期清理工作目录（保留模板源文件夹）
         cleanup_old_files(config.EXCEL_FILES_DIR, days=7, exclude=["sample_data"])
+
+    def has_pending(self, user_id: str) -> bool:
+        """该用户在分仓流程里是否有进行中任务（供统一路由）。"""
+        if not user_id:
+            return False
+        uid = str(user_id)
+        state = self.state_manager.state
+        if uid in (state.get("ops_active") or {}):
+            return True
+        if (state.get("ops_queue") or {}).get(uid):
+            return True
+        if state.get("operation_user_id") == uid:
+            return True
+        if uid in (state.get("operation_user_ids") or []):
+            return True
+        if state.get("logistics_user_id") == uid and self.state_manager.logistics_phase() != "IDLE":
+            return True
+        return False
     
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         """主消息处理入口"""

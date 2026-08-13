@@ -80,6 +80,7 @@ class LogisticsRouterTests(unittest.TestCase):
             config=SimpleNamespace(robot_code="", workspace="/tmp", pinxiang_workspace="/tmp"),
         )
         self.router.pinxiang_handler.has_pending = MagicMock(return_value=False)
+        self.router.lcl_handler.has_pending = MagicMock(return_value=False)
 
     def tearDown(self) -> None:
         self._path_patch.stop()
@@ -117,6 +118,23 @@ class LogisticsRouterTests(unittest.TestCase):
             "pinxiang",
         )
 
+    def test_stale_pinxiang_branch_yields_to_lcl_pending(self):
+        """不分仓已结束、分支仍停在 pinxiang 时，模板2 / 装箱表进分仓。"""
+        self.router._set_branch("u1", "pinxiang")
+        self.router.pinxiang_handler.has_pending = MagicMock(return_value=False)
+        self.router.lcl_handler.has_pending = MagicMock(return_value=True)
+        self.assertEqual(self.router._route({"text": {"content": "模板2"}}, user_id="u1"), "lcl")
+        self.assertEqual(
+            self.router._route({"downloadCodes": ["x"], "text": {"content": ""}}, user_id="u1"),
+            "lcl",
+        )
+
+    def test_stale_pinxiang_without_lcl_stays_pinxiang(self):
+        self.router._set_branch("u1", "pinxiang")
+        self.router.pinxiang_handler.has_pending = MagicMock(return_value=False)
+        self.router.lcl_handler.has_pending = MagicMock(return_value=False)
+        self.assertEqual(self.router._route({"text": {"content": "模板2"}}, user_id="u1"), "pinxiang")
+
     def test_pinxiang_pending_ops_choice_not_stolen_by_menu(self):
         """选运营时回复 1 不得进入发货单核对。"""
         self.router.pinxiang_handler.has_pending = MagicMock(return_value=True)
@@ -134,6 +152,37 @@ class LogisticsRouterTests(unittest.TestCase):
         self.assertEqual(self.router._route({"text": {"content": "重置"}}, user_id="u1"), "reset")
         self.router._reset_user("u1")
         self.assertNotIn("u1", self.router._selected_branch_by_user)
+
+    def test_reset_then_menu_works_while_lcl_pending(self):
+        """重置清的是分支，不该被分仓进行中任务卡住无法选菜单。"""
+        self.router._set_branch("u1", "pinxiang")
+        self.router.lcl_handler.has_pending = MagicMock(return_value=True)
+        self.router._reset_user("u1")
+        self.assertEqual(self.router._route({"text": {"content": "1"}}, user_id="u1"), "select_cp")
+
+    def test_pinxiang_lcl_workbook_handoff_redispatches(self):
+        import asyncio
+
+        self.router._set_branch("u1", "pinxiang")
+        self.router._extract_user_id = lambda _payload: "u1"
+        self.router._route = lambda _payload, user_id="": "pinxiang"
+        self.router._log_route_event = lambda *_a, **_k: None
+        seen: list[str] = []
+
+        async def _px(_cb):
+            seen.append("px")
+            return "OK", "HANDOFF_LCL"
+
+        async def _lcl(_cb):
+            seen.append("lcl")
+            return "OK", "LCL_OK"
+
+        self.router.pinxiang_handler.process = _px
+        self.router.lcl_handler.process = _lcl
+        status, ack = asyncio.run(self.router.process(MagicMock(data={"senderStaffId": "u1"})))
+        self.assertEqual(seen, ["px", "lcl"])
+        self.assertEqual((status, ack), ("OK", "LCL_OK"))
+        self.assertEqual(self.router._selected_branch_by_user.get("u1"), "lcl")
 
     def test_branch_selection_persists_across_restart(self):
         self.router._set_branch("u1", "pinxiang")
