@@ -6,13 +6,13 @@
 
 统一 Stream：`apps/logistics_bot` → 回复 `4`。
 
-## 流程（与原 lcl 一致）
+## 流程
 
-1. 物流上传发货单 Excel（需「发货单详情」等）→ **不做发票号登记**
+1. 物流上传发货单 Excel（需「发货单详情」等）
 2. 机器人拼箱 + 生成 Amazon Manifest 模板1
 3. 物流 **确认** → **选择运营** → 只转发给该运营（拼箱结果 + 模板）
 4. 运营可回【模板2】；可上传包装信息表回填
-5. 后续领星删单 / 发货单号 / 清关等步骤仍走原逻辑（依赖登记的步骤会提示未登记）
+5. 运营回复【删除】或【不删除】后流程结束
 
 ## 配置
 
@@ -23,13 +23,12 @@
 | `LCL_LOGISTICS_USERS` / `LOGISTICS_USERS` | 物流白名单（空=开放） |
 | `PINXIANG_OPS_USERS` | 运营名单（与流程三不分仓共用） |
 | `LCL_BASE_DIR` | 默认本 app 目录 |
-| 登记表 UNC | `LCL_REGISTER_EXCEL_PATH` 等 |
+| `LINGXING_*` | 删单用本仓库领星客户端 |
 
 ## 依赖
 
 - monorepo `requirements.txt` 已含 `pandas`
 - 领星删单用本仓库 `lingxing_api.py`（`LINGXING_*`）
-- 登记/清关仍依赖宿主机 `Common`（`LCL_COMMON_ROOT`）
 
 ## 注意
 

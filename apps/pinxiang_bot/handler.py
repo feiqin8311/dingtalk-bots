@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 import json
 import logging
@@ -361,7 +362,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             # 运营取消：只清自己当前单/队列；物流取消：只清物流待办，不动运营
             if user_id in self._pending_ops or self._ops_queue.get(user_id):
                 self._drop_ops_pending_only(user_id)
-                await self._send_text(user_id, "已取消您当前的运营任务（含队列）。")
+                await self._send_text(user_id, "已取消您当前的不分仓任务（含队列）。")
+                await self._promote_peer(user_id)
             else:
                 self._drop_logistics_pending_only(user_id)
                 await self._send_text(user_id, "已取消本次拼箱任务（不影响运营侧进行中的单）。")
@@ -515,8 +517,9 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         if forward_keys:
             self._drop_queue_jobs_overlapping(ops_id, forward_keys)
 
-        if existing is not None:
-            # 运营忙碌且非同单：入队，物流立即释放可接下一单
+        peer_busy = existing is None and self._peer_has_active_ops(ops_id)
+        if existing is not None or peer_busy:
+            # 运营忙碌（含正在做分仓）且非同单：入队，物流立即释放
             with self._pending_lock:
                 q = self._ops_queue.setdefault(ops_id, [])
                 q.append(job)
@@ -525,8 +528,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 self._save_pending_state_unlocked()
             busy_label = (
                 existing.packing_result_path.name
-                if existing.packing_result_path
-                else "进行中任务"
+                if existing is not None and existing.packing_result_path
+                else "分仓拼箱任务"
             )
             await self._send_text(
                 logistics_user_id,
@@ -698,6 +701,32 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             drop_note = f"\n已丢弃队列中与本单重复的物流转发：{', '.join(dropped)}（以您上传为准）。"
 
         existing = self._pending_ops.get(user_id)
+        if existing is None and self._peer_has_active_ops(user_id):
+            job = PendingOpsJob(
+                logistics_user_id="",
+                logistics_name_hint="运营自助",
+                packing_result_path=packing_path,
+                merge_dir=job_dir,
+                shipment_path=packing_path,
+                updated_at=time.time(),
+                logistics_channel=result.logistics_channel or "",
+                store_name=result.store_name or "",
+                country=result.country or "",
+                amazon_template_path=amazon_template_path if amazon_template_path else None,
+            )
+            with self._pending_lock:
+                q = self._ops_queue.setdefault(user_id, [])
+                q.append(job)
+                pos = len(q)
+                self._save_pending_state_unlocked()
+            await self._send_text(
+                user_id,
+                f"当前正在处理分仓拼箱。本单（不分仓）已加入队列（第 {pos} 位）。\n"
+                f"拼箱结果：{packing_name}\n"
+                "请先完成当前单，完成后会自动推送。"
+                f"{drop_note}",
+            )
+            return
         if existing is not None:
             # 运营上传优先：覆盖当前单（含物流转发的同单）
             existing.packing_result_path = packing_path
@@ -829,6 +858,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             self._save_pending_state_unlocked()
         # 一单一单：完成后自动推送排队中的下一单
         await self._promote_ops_queue(ops_user_id)
+        if ops_user_id not in self._pending_ops:
+            await self._promote_peer(ops_user_id)
 
     async def _handle_template_v2(self, user_id: str) -> None:
         """运营或物流：用 MPL2 壳子重出模板2，数据与当前模板1一致。"""
@@ -1068,14 +1099,37 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         self._drop_logistics_pending_only(user_id)
 
     def has_pending(self, user_id: str) -> bool:
+        """路由用：当前物流会话或当前运营单。排队不抢路由。"""
         if not user_id:
             return False
         self._cleanup_pending()
-        return (
-            user_id in self._pending_logistics
-            or user_id in self._pending_ops
-            or bool(self._ops_queue.get(user_id))
-        )
+        return user_id in self._pending_logistics or user_id in self._pending_ops
+
+    def has_active_ops(self, user_id: str) -> bool:
+        return bool(user_id and user_id in self._pending_ops)
+
+    def has_logistics_session(self, user_id: str) -> bool:
+        return bool(user_id and user_id in self._pending_logistics)
+
+    def _peer_has_active_ops(self, user_id: str) -> bool:
+        fn = getattr(getattr(self, "peer_promoter", None), "has_active_ops", None)
+        return bool(fn(user_id)) if callable(fn) else False
+
+    async def promote_queued(self, ops_user_id: str) -> bool:
+        if not ops_user_id or ops_user_id in self._pending_ops:
+            return False
+        if not (self._ops_queue.get(ops_user_id) or []):
+            return False
+        await self._promote_ops_queue(ops_user_id)
+        return ops_user_id in self._pending_ops
+
+    async def _promote_peer(self, ops_id: str) -> None:
+        fn = getattr(getattr(self, "peer_promoter", None), "promote_queued", None)
+        if not callable(fn):
+            return
+        result = fn(ops_id)
+        if inspect.isawaitable(result):
+            await result
 
     def _set_pending_logistics(self, user_id: str, pending: PendingLogistics) -> None:
         with self._pending_lock:

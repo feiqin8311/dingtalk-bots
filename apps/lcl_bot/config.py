@@ -13,8 +13,6 @@ from dotenv import load_dotenv
 PACKAGE_DIR = Path(__file__).resolve().parent
 # monorepo root = …/dingtalk-bots
 MONOREPO_ROOT = PACKAGE_DIR.parent.parent
-# yida workspace (sibling Common) = monorepo parent
-YIDA_ROOT = MONOREPO_ROOT.parent
 
 # 统一根 .env；app 级仅补缺
 for candidate in (
@@ -79,12 +77,6 @@ TECHNOLOGY_USERS = [
 _other_users_str = os.getenv("LCL_OTHER_USERS") or os.getenv("OTHER_USERS") or ""
 OTHER_USERS = [uid.strip() for uid in _other_users_str.split(",") if uid.strip()]
 
-_agl_warehouse_at_str = os.getenv("AGL_WAREHOUSE_AT_MOBILES", "")
-AGL_WAREHOUSE_AT_MOBILES = [m.strip() for m in _agl_warehouse_at_str.split(",") if m.strip()]
-
-_agl_doc_at_str = os.getenv("AGL_DOC_AT_MOBILES", "")
-AGL_DOC_AT_MOBILES = [m.strip() for m in _agl_doc_at_str.split(",") if m.strip()]
-
 # 工作目录：默认本 app 下（compose 可挂载）
 BASE_DIR = os.getenv("LCL_BASE_DIR", str(PACKAGE_DIR)).strip() or str(PACKAGE_DIR)
 EXCEL_FILES_DIR = os.getenv("LCL_EXCEL_FILES_DIR", os.path.join(BASE_DIR, "Excel_Files"))
@@ -113,26 +105,6 @@ STATE_FILE_PATH = os.getenv(
     os.path.join(BASE_DIR, "Workflow_State", "workflow_state.json"),
 )
 
-REGISTER_EXCEL_PATH = os.getenv(
-    "LCL_REGISTER_EXCEL_PATH",
-    r"\\192.168.0.45\供应链管理\2 物流发货管理\17.单证数据表维护\测试\2026出货发票号登记表.xlsx",
-)
-REGISTER_SHEET = os.getenv("LCL_REGISTER_SHEET", "报关")
-
-EZARC_CODE_COL = 1
-EZARC_REMARK_COL = 2
-EZARC_FOLDER_BASE = os.getenv(
-    "LCL_EZARC_FOLDER_BASE",
-    r"\\192.168.0.45\供应链管理\2 物流发货管理\17.单证数据表维护\测试",
-)
-
-TOLESA_CODE_COL = 6
-TOLESA_REMARK_COL = 7
-TOLESA_FOLDER_BASE = os.getenv(
-    "LCL_TOLESA_FOLDER_BASE",
-    r"\\192.168.0.45\供应链管理\2 物流发货管理\2.1 匠晟 发货登记\2026年",
-)
-
 os.makedirs(EXCEL_FILES_DIR, exist_ok=True)
 os.makedirs(TEMPLATE_FILES_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(STATE_FILE_PATH) or ".", exist_ok=True)
@@ -145,9 +117,4 @@ DINGTALK_CORP_TOKEN_URL = f"{DINGTALK_OAPI_BASE_URL}/gettoken"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = os.getenv("LOG_FORMAT", "%(asctime)s | %(levelname)s | %(message)s")
 
-# handlers 里用 PROJECT_ROOT.parent 找 Common；指向 monorepo 上级 (yida)
 PROJECT_ROOT = MONOREPO_ROOT
-# 让 Common 可 import：优先 LCL_COMMON_ROOT，否则 monorepo 上级 yida/
-COMMON_ROOT = Path((os.getenv("LCL_COMMON_ROOT") or str(YIDA_ROOT)).strip())
-if str(COMMON_ROOT) not in sys.path:
-    sys.path.insert(0, str(COMMON_ROOT))

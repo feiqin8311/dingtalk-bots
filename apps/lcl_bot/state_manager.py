@@ -21,9 +21,6 @@ class WorkflowState:
     LOGISTICS_CONFIRMED = 'LOGISTICS_CONFIRMED'  # 已转发运营，待运营上传
     OPERATION_UPLOADED = 'OPERATION_UPLOADED'  # 运营已上传，处理中
     WAIT_DELETE_CONFIRMATION = 'WAIT_DELETE_CONFIRMATION'  # 等待运营确认是否删除发货单
-    WAIT_SHIPMENT_NUMBERS = 'WAIT_SHIPMENT_NUMBERS'  # 等待运营输入领星发货单号
-    WAIT_CUSTOMS_INFO = 'WAIT_CUSTOMS_INFO'  # 等待物流补全清关资料
-    WAIT_LOGISTICS_FILES = 'WAIT_LOGISTICS_FILES'  # 等待物流上传发货单/报关资料Excel
 
 
 class StateManager:
@@ -57,20 +54,10 @@ class StateManager:
             'packing_result_path': None,
             'amazon_template_path': None,
             'shipping_numbers': None,
-            'lingxing_shipment_numbers': None,
             'logistics_user_id': None,
             'operation_user_id': None,
             'conversation_id': None,
             'workflow_folder_path': None,
-            'registry_code': None,
-            'shared_folder_path': None,
-            'pending_customs_shipments': None,
-            'pending_customs_reason': None,
-            'lingxing_partial_results': None,
-            'lock_stock_partial_results': None,
-            'logistics_files_received': [],
-            'logistics_files_expected': None,
-            'customs_prev_status': None,
             # 运营侧：一单一单 + 队列（与物流上传会话解耦）
             'ops_active': {},   # ops_id -> job dict
             'ops_queue': {},    # ops_id -> [job dict, ...]
@@ -154,25 +141,15 @@ class StateManager:
         """检查是否等待运营确认删除发货单"""
         return self.get_status() == WorkflowState.WAIT_DELETE_CONFIRMATION
 
-    def is_waiting_for_shipment_numbers(self) -> bool:
-        """检查是否等待运营输入发货单号"""
-        return self.get_status() == WorkflowState.WAIT_SHIPMENT_NUMBERS
-
-    def is_waiting_for_customs_info(self) -> bool:
-        """检查是否等待物流补全清关资料"""
-        return self.get_status() == WorkflowState.WAIT_CUSTOMS_INFO
-
-    def is_waiting_for_logistics_files(self) -> bool:
-        """检查是否等待物流上传发货单/报关资料文件"""
-        return self.get_status() == WorkflowState.WAIT_LOGISTICS_FILES
-    
     def set_logistics_uploaded(self, logistics_user_id: str, logistics_file_path: str, 
                                packing_result_path: str, conversation_id: str,
                                amazon_template_path: Optional[str] = None,
                                shipping_numbers: Optional[str] = None,
                                workflow_folder_path: Optional[str] = None,
-                               registry_code: Optional[str] = None,
-                               shared_folder_path: Optional[str] = None):
+                               shop: Optional[str] = None,
+                               shop_full: Optional[str] = None,
+                               country: Optional[str] = None,
+                               transport_method: Optional[str] = None):
         """设置物流已上传状态"""
         if not self.can_logistics_upload():
             raise ValueError(
@@ -190,8 +167,10 @@ class StateManager:
             'shipping_numbers': shipping_numbers,
             'conversation_id': conversation_id,
             'workflow_folder_path': workflow_folder_path,
-            'registry_code': registry_code,
-            'shared_folder_path': shared_folder_path,
+            'shop': shop,
+            'shop_full': shop_full,
+            'country': country,
+            'transport_method': transport_method,
             'created_at': datetime.now().isoformat()
         })
         self._save_state()
@@ -219,8 +198,10 @@ class StateManager:
             "logistics_user_id": self.state.get("logistics_user_id"),
             "conversation_id": self.state.get("conversation_id"),
             "workflow_folder_path": self.state.get("workflow_folder_path"),
-            "registry_code": self.state.get("registry_code"),
-            "shared_folder_path": self.state.get("shared_folder_path"),
+            "shop": self.state.get("shop"),
+            "shop_full": self.state.get("shop_full"),
+            "country": self.state.get("country"),
+            "transport_method": self.state.get("transport_method"),
             "status": "WAIT_AMAZON",
             "created_at": datetime.now().isoformat(),
         }
@@ -273,6 +254,22 @@ class StateManager:
             self._save_state()
         return dropped
 
+    def pop_next_queued_job(self, ops_id: str):
+        """弹出该运营队列第一单；无则 None。"""
+        ops_id = str(ops_id)
+        queue = dict(self.state.get("ops_queue") or {})
+        items = list(queue.get(ops_id) or [])
+        if not items:
+            return None
+        job = items.pop(0)
+        if items:
+            queue[ops_id] = items
+        else:
+            queue.pop(ops_id, None)
+        self.state["ops_queue"] = queue
+        self._save_state()
+        return job
+
     def enqueue_ops_job(self, ops_id: str, job: Dict[str, Any]) -> int:
         """运营忙碌时入队，返回排队位次（1-based）。"""
         ops_id = str(ops_id)
@@ -303,8 +300,10 @@ class StateManager:
             "logistics_user_id",
             "conversation_id",
             "workflow_folder_path",
-            "registry_code",
-            "shared_folder_path",
+            "shop",
+            "shop_full",
+            "country",
+            "transport_method",
         ):
             if job.get(key) is not None:
                 self.state[key] = job.get(key)
@@ -331,8 +330,10 @@ class StateManager:
                 "logistics_user_id",
                 "conversation_id",
                 "workflow_folder_path",
-                "registry_code",
-                "shared_folder_path",
+                "shop",
+                "shop_full",
+                "country",
+                "transport_method",
             ):
                 if job.get(key) is not None:
                     self.state[key] = job.get(key)
@@ -412,86 +413,6 @@ class StateManager:
         self._save_state()
         print(f"✅ 状态已更新: {WorkflowState.WAIT_DELETE_CONFIRMATION}")
 
-    def set_waiting_for_shipment_numbers(self, operation_user_id: Optional[str] = None):
-        """设置等待输入发货单号状态"""
-        self.state['status'] = WorkflowState.WAIT_SHIPMENT_NUMBERS
-        if operation_user_id:
-            self.state['operation_user_id'] = operation_user_id
-        self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.WAIT_SHIPMENT_NUMBERS}")
-
-    def set_waiting_for_customs_info(self, pending_shipments: list, reason: str,
-                                     partial_results: Optional[list] = None,
-                                     lock_stock_results: Optional[dict] = None):
-        """设置等待物流补全清关资料状态"""
-        self.state['customs_prev_status'] = self.state.get('status')
-        self.state['status'] = WorkflowState.WAIT_CUSTOMS_INFO
-        self.state['pending_customs_shipments'] = pending_shipments
-        self.state['pending_customs_reason'] = reason
-        self.state['lingxing_partial_results'] = partial_results or []
-        self.state['lock_stock_partial_results'] = lock_stock_results or {"success": [], "failed": []}
-        self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.WAIT_CUSTOMS_INFO}")
-
-    def clear_customs_waiting(self, restore_status: Optional[str] = None):
-        """清理等待清关补全状态，恢复之前状态"""
-        prev_status = restore_status or self.state.get('customs_prev_status') or WorkflowState.WAIT_SHIPMENT_NUMBERS
-        self.state['status'] = prev_status
-        self.state['pending_customs_shipments'] = None
-        self.state['pending_customs_reason'] = None
-        self.state['lingxing_partial_results'] = None
-        self.state['lock_stock_partial_results'] = None
-        self.state['customs_prev_status'] = None
-        self._save_state()
-
-    def get_pending_customs_shipments(self) -> Optional[list]:
-        """获取待处理清关的发货单列表"""
-        return self.state.get('pending_customs_shipments')
-
-    def get_pending_customs_reason(self) -> Optional[str]:
-        """获取清关缺失原因"""
-        return self.state.get('pending_customs_reason')
-
-    def get_lingxing_partial_results(self) -> Optional[list]:
-        """获取领星处理部分结果"""
-        return self.state.get('lingxing_partial_results')
-
-    def get_lock_stock_partial_results(self) -> Optional[dict]:
-        """获取库存分配部分结果"""
-        return self.state.get('lock_stock_partial_results')
-
-    def set_waiting_for_logistics_files(self, expected_count: int = 2):
-        """设置等待物流上传Excel文件状态"""
-        self.state['status'] = WorkflowState.WAIT_LOGISTICS_FILES
-        self.state['logistics_files_received'] = []
-        self.state['logistics_files_expected'] = expected_count
-        self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.WAIT_LOGISTICS_FILES}")
-
-    def add_logistics_received_file(self, file_path: str):
-        """记录物流上传的文件"""
-        files = self.state.get('logistics_files_received') or []
-        files.append(file_path)
-        self.state['logistics_files_received'] = files
-        self._save_state()
-
-    def get_logistics_received_files(self) -> list:
-        """获取物流已上传文件列表"""
-        return self.state.get('logistics_files_received') or []
-
-    def get_logistics_files_expected(self) -> Optional[int]:
-        """获取物流期望上传文件数量"""
-        return self.state.get('logistics_files_expected')
-
-    def set_lingxing_shipment_numbers(self, numbers: list):
-        """存储领星发货单号列表"""
-        self.state['lingxing_shipment_numbers'] = numbers
-        self._save_state()
-
-    def get_lingxing_shipment_numbers(self) -> Optional[list]:
-        """获取领星发货单号列表"""
-        return self.state.get('lingxing_shipment_numbers')
-    
     def reset_logistics_only(self) -> None:
         """物流【重置】专用：只清物流会话，完整保留所有运营 active/queue。"""
         ops_active = dict(self.state.get("ops_active") or {})
@@ -610,10 +531,6 @@ class StateManager:
         alias_map = {
             "分5仓拼箱": WorkflowState.WAIT_DELETE_CONFIRMATION,
             "拼箱": WorkflowState.WAIT_DELETE_CONFIRMATION,
-            "领星编辑": WorkflowState.WAIT_SHIPMENT_NUMBERS,
-            "领星": WorkflowState.WAIT_SHIPMENT_NUMBERS,
-            "生成清关资料": WorkflowState.WAIT_LOGISTICS_FILES,
-            "清关资料": WorkflowState.WAIT_LOGISTICS_FILES,
         }
         if alias not in alias_map:
             raise ValueError(f"未知里程碑阶段: {alias}")
@@ -630,9 +547,6 @@ class StateManager:
             WorkflowState.LOGISTICS_CONFIRMED,
             WorkflowState.OPERATION_UPLOADED,
             WorkflowState.WAIT_DELETE_CONFIRMATION,
-            WorkflowState.WAIT_SHIPMENT_NUMBERS,
-            WorkflowState.WAIT_CUSTOMS_INFO,
-            WorkflowState.WAIT_LOGISTICS_FILES,
         ]
         
         if previous_status not in valid_statuses:

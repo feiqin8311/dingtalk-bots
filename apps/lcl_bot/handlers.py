@@ -4,6 +4,8 @@
 消息处理器 - 钉钉机器人消息和工作流处理
 """
 
+import asyncio
+import inspect
 import logging
 import os
 import re
@@ -17,7 +19,6 @@ import dingtalk_stream
 
 from . import config
 from .lingxing_helper import delete_shipment_list
-from .file_helper import process_customs_files
 from .processor import PackingBoxProcessor
 from .shipment_registry import extract_shipment_info
 from .state_manager import WorkflowState, get_state_manager
@@ -48,23 +49,71 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         # 定期清理工作目录（保留模板源文件夹）
         cleanup_old_files(config.EXCEL_FILES_DIR, days=7, exclude=["sample_data"])
 
+    @staticmethod
+    def _shipment_meta_text(*, job: Optional[dict] = None, shipment_info=None) -> str:
+        shop = ""
+        country = ""
+        transport = ""
+        if job:
+            shop = str(job.get("shop_full") or job.get("shop") or "").strip()
+            country = str(job.get("country") or "").strip()
+            transport = str(job.get("transport_method") or "").strip()
+        if shipment_info is not None:
+            shop = shop or str(getattr(shipment_info, "shop_full", "") or getattr(shipment_info, "shop", "") or "").strip()
+            country = country or str(getattr(shipment_info, "country", "") or "").strip()
+            transport = transport or str(getattr(shipment_info, "transport_method", "") or "").strip()
+        lines = []
+        if transport:
+            lines.append(f"物流渠道：{transport}")
+        if shop:
+            lines.append(f"店铺：{shop}")
+        if country:
+            lines.append(f"国家：{country}")
+        return ("\n".join(lines) + "\n") if lines else ""
+
     def has_pending(self, user_id: str) -> bool:
-        """该用户在分仓流程里是否有进行中任务（供统一路由）。"""
+        """路由用：当前运营单或物流会话。排队不抢路由。"""
+        return self.has_active_ops(user_id) or self.has_logistics_session(user_id)
+
+    def has_active_ops(self, user_id: str) -> bool:
         if not user_id:
             return False
-        uid = str(user_id)
-        state = self.state_manager.state
-        if uid in (state.get("ops_active") or {}):
-            return True
-        if (state.get("ops_queue") or {}).get(uid):
-            return True
-        if state.get("operation_user_id") == uid:
-            return True
-        if uid in (state.get("operation_user_ids") or []):
-            return True
-        if state.get("logistics_user_id") == uid and self.state_manager.logistics_phase() != "IDLE":
-            return True
-        return False
+        return bool((self.state_manager.state.get("ops_active") or {}).get(str(user_id)))
+
+    def has_logistics_session(self, user_id: str) -> bool:
+        if not user_id:
+            return False
+        if str(self.state_manager.get_logistics_user_id() or "") != str(user_id):
+            return False
+        return self.state_manager.logistics_phase() != "IDLE"
+
+    def _peer_has_active_ops(self, user_id: str) -> bool:
+        fn = getattr(getattr(self, "peer_promoter", None), "has_active_ops", None)
+        return bool(fn(user_id)) if callable(fn) else False
+
+    def promote_queued(self, ops_id: str) -> bool:
+        """无当前分仓单时，弹出队列下一单并推送。"""
+        if not ops_id or self.state_manager.ops_is_busy(ops_id):
+            return False
+        job = self.state_manager.pop_next_queued_job(ops_id)
+        if not job:
+            return False
+        job = dict(job)
+        job["needs_push"] = True
+        self.state_manager.activate_ops_job(ops_id, job)
+        self._after_ops_workflow_reset(str(ops_id))
+        return True
+
+    def _kick_peer_promote(self, ops_id: str) -> None:
+        fn = getattr(getattr(self, "peer_promoter", None), "promote_queued", None)
+        if not callable(fn):
+            return
+        result = fn(ops_id)
+        if inspect.isawaitable(result):
+            try:
+                asyncio.get_running_loop().create_task(result)
+            except RuntimeError:
+                pass
     
     async def process(self, callback: dingtalk_stream.CallbackMessage):
         """主消息处理入口"""
@@ -224,22 +273,10 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             await self._handle_delete_decision(incoming_message, user_role, delete=True)
         elif text_content in ['不删除', '否', 'no', 'NO', '保留']:
             await self._handle_delete_decision(incoming_message, user_role, delete=False)
-        elif text_content in ['跳过', 'skip', 'SKIP']:
-            await self._handle_skip_shipment_numbers(incoming_message, user_role)
         elif text_content in ['获取文件', '下载文件', 'getfile', '文件', '获取', '拼箱结果']:
             await self._handle_get_file(incoming_message, user_role)
         elif text_content in ['模板2', '模板 2', '生成模板2', '重新生成模板2', 'template2', 'template 2']:
             await self._handle_generate_template_v2(incoming_message, user_role)
-        elif self.state_manager.is_waiting_for_customs_info():
-            await self._handle_customs_info_confirmation(incoming_message, user_role, text_content)
-        elif self.state_manager.is_waiting_for_logistics_files() and user_role == 'logistics':
-            self._send_text_reply(
-                "📥 请上传发货单和报关资料Excel文件。",
-                incoming_message
-            )
-        elif self.state_manager.is_waiting_for_shipment_numbers() and self._is_operation_or_dual(incoming_message, user_role):
-            # 处理发货单号输入
-            await self._handle_shipment_numbers_input(incoming_message, text_content)
         else:
             # 默认回复
             self._send_text_reply(
@@ -307,14 +344,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 )
                 return
 
-            # 物流补充发货单/报关资料文件
-            if user_role == 'logistics' and self.state_manager.is_waiting_for_logistics_files():
-                await self._handle_logistics_supporting_file(
-                    incoming_message, sender_id,
-                    file_name, download_code
-                )
-                return
-            
             # 物流兼任运营：有运营 active 任务时走运营通道；否则仍按物流上传
             if (user_role == 'logistics'
                 and self._is_operation_or_dual(incoming_message, user_role)
@@ -375,9 +404,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 robot_code=robot_code
             )
             
-            # 菜单 4 不做发票号登记/共享盘建夹，直接拼箱
-            registry_code = None
-            shared_folder_path = None
+            shipment_info = None
             try:
                 shipment_info = extract_shipment_info(logistics_file_path)
                 self.logger.info(
@@ -425,9 +452,11 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self._send_excel_copy_to_others(media_id, uploaded_file_name, "拼箱结果")
             
             # 5. 发送确认提示
+            meta = self._shipment_meta_text(shipment_info=shipment_info)
             self._send_text_reply(
                 "📋 处理结果已发送给您，请查收并确认。\n"
-                "回复【确认】➡️ 选择运营并转发\n"
+                + meta
+                + "回复【确认】➡️ 选择运营并转发\n"
                 "上传修正版拼箱结果Excel ➡️ 替换当前结果并重新生成Amazon模板\n"
                 "回复【重置】➡️ 放弃本次结果并重新上传发货单",
                 incoming_message
@@ -442,8 +471,10 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 amazon_template_path=amazon_template_path,
                 shipping_numbers=shipping_numbers,
                 workflow_folder_path=workflow_folder,
-                registry_code=registry_code,
-                shared_folder_path=shared_folder_path,
+                shop=getattr(shipment_info, "shop", None),
+                shop_full=getattr(shipment_info, "shop_full", None),
+                country=getattr(shipment_info, "country", None),
+                transport_method=getattr(shipment_info, "transport_method", None),
             )
             
             self.logger.info("物流工作流完成，等待确认")
@@ -544,14 +575,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         )
         temp_processor.create_amazon_template(template_path, merge_summary)
 
-        shared_folder_path = self.state_manager.get_full_state().get('shared_folder_path')
-        if shared_folder_path:
-            try:
-                shutil.copy2(result_path, os.path.join(shared_folder_path, os.path.basename(result_path)))
-                shutil.copy2(template_path, os.path.join(shared_folder_path, os.path.basename(template_path)))
-            except Exception as copy_exc:
-                self.logger.warning(f"复制修正版文件到共享盘失败: {copy_exc}")
-
         self.state_manager.update_packing_result(result_path, template_path)
         return result_path, template_path
 
@@ -603,110 +626,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
 
         return merge_summary
 
-    async def _handle_logistics_supporting_file(self, incoming_message, sender_id: str,
-                                                file_name: str, download_code: str):
-        """处理物流补充上传的发货单/报关资料文件"""
-        try:
-            import sys
-            from pathlib import Path
-            from openpyxl import load_workbook
-
-            stored_logistics_id = self.state_manager.get_logistics_user_id()
-            if stored_logistics_id and not self._is_same_user(stored_logistics_id, incoming_message):
-                self._send_text_reply(
-                    "⚠️ 请由本次流程的物流人员上传文件。",
-                    incoming_message
-                )
-                return
-
-            state = self.state_manager.get_full_state()
-            registry_code = state.get("registry_code")
-            shared_folder_path = state.get("shared_folder_path")
-            workflow_folder = self.state_manager.get_workflow_folder_path()
-
-            if shared_folder_path:
-                target_dir = shared_folder_path
-            else:
-                if not workflow_folder or not os.path.isdir(workflow_folder):
-                    workflow_folder = self._create_workflow_folder()
-                    self.state_manager.update_workflow_folder_path(workflow_folder)
-                target_dir = workflow_folder
-
-            os.makedirs(target_dir, exist_ok=True)
-
-            robot_code = incoming_message.robot_code
-            file_info = incoming_message.extensions.get('content', {}) if hasattr(incoming_message, 'extensions') else None
-            saved_path = self.dingtalk_api.download_file(
-                download_code, file_name, target_dir,
-                file_info=file_info,
-                robot_code=robot_code
-            )
-
-            self.state_manager.add_logistics_received_file(saved_path)
-
-            # 尝试导出报关资料PDF及合同PDF
-            try:
-                common_path = str(getattr(config, 'COMMON_ROOT', config.PROJECT_ROOT.parent))
-                if common_path not in sys.path:
-                    sys.path.insert(0, common_path)
-                from Common.Utils.excel_to_pdf import excel_to_pdf, excel_sheet_to_pdf
-
-                lowered_name = str(file_name)
-                is_customs_excel = "报关资料" in lowered_name
-                has_contract_sheet = False
-                if is_customs_excel:
-                    try:
-                        wb = load_workbook(saved_path, read_only=True, data_only=True)
-                        if "合同" in wb.sheetnames:
-                            has_contract_sheet = True
-                        wb.close()
-                    except Exception:
-                        pass
-
-                if is_customs_excel and shared_folder_path:
-                    invoice_no = registry_code or ""
-                    pdf_dir_name = f"{invoice_no} 报关资料&发票" if invoice_no else "报关资料&发票"
-                    pdf_dir = os.path.join(shared_folder_path, pdf_dir_name)
-                    os.makedirs(pdf_dir, exist_ok=True)
-
-                    pdf_name = f"{Path(saved_path).stem}.pdf"
-                    pdf_path = os.path.join(pdf_dir, pdf_name)
-                    excel_to_pdf(saved_path, pdf_path)
-
-                    if has_contract_sheet:
-                        contract_pdf_name = f"{invoice_no} 销售合同.pdf" if invoice_no else "销售合同.pdf"
-                        contract_pdf_path = os.path.join(shared_folder_path, contract_pdf_name)
-                        excel_sheet_to_pdf(saved_path, "合同", contract_pdf_path)
-
-            except Exception as pdf_exc:
-                self.logger.error(f"报关资料PDF导出失败: {pdf_exc}")
-            received = len(self.state_manager.get_logistics_received_files())
-            expected = self.state_manager.get_logistics_files_expected() or 2
-
-            reply = (
-                f"✅ 已保存文件到共享盘：{os.path.basename(saved_path)}\n"
-                f"已收到 {received}/{expected} 个文件。"
-            )
-            if received >= expected:
-                reply += "\n文件已收齐，开始生成清关资料，请稍候..."
-                self._send_text_reply(reply, incoming_message)
-                await self._process_customs_after_logistics_upload(
-                    incoming_message,
-                    self.state_manager.get_lingxing_shipment_numbers() or [],
-                )
-                return
-            else:
-                reply += "\n请继续上传剩余文件。"
-
-            self._send_text_reply(reply, incoming_message)
-
-        except Exception as e:
-            self.logger.error(f"保存物流补充文件失败: {e}", exc_info=True)
-            self._send_text_reply(
-                f"❌ 保存文件失败: {str(e)}",
-                incoming_message
-            )
-    
     async def _handle_confirmation(self, incoming_message, user_role: str):
         """处理物流人员的确认 → 进入选运营"""
         try:
@@ -798,6 +717,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         self.dingtalk_api.send_text_message(
             corp_user_id,
             head
+            + self._shipment_meta_text(job=job)
             + "请下载拼箱结果与 Amazon 模板；已默认发送模板1，如需新版格式回复【模板2】。\n"
             + "也可上传卖家后台包装信息表，机器人将自动填写并回传。\n"
             + f"拼箱结果：{packing_name}",
@@ -814,6 +734,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         self.state_manager.reset()
         if oid:
             self._after_ops_workflow_reset(str(oid))
+            if not self.state_manager.ops_is_busy(str(oid)):
+                self._kick_peer_promote(str(oid))
 
     def _after_ops_workflow_reset(self, ops_user_id: str) -> None:
         """reset 后若提升了队列下一单，推送文件。"""
@@ -845,24 +767,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self._send_text_reply("⚠️ 拼箱结果文件丢失，请重新上传发货单。", incoming_message)
             return
 
-        shared_folder_path = self.state_manager.state.get("shared_folder_path")
-        if shared_folder_path and os.path.exists(packing_result_path):
-            try:
-                shared_result_path = os.path.join(shared_folder_path, os.path.basename(packing_result_path))
-                shutil.copy2(packing_result_path, shared_result_path)
-            except Exception as copy_exc:
-                self.logger.warning(f"复制拼箱结果到共享盘失败: {copy_exc}")
-
         amazon_template_path = self.state_manager.get_amazon_template_path()
-        if amazon_template_path and os.path.exists(amazon_template_path) and shared_folder_path:
-            try:
-                shared_template_path = os.path.join(
-                    shared_folder_path, os.path.basename(amazon_template_path)
-                )
-                shutil.copy2(amazon_template_path, shared_template_path)
-            except Exception as copy_exc:
-                self.logger.warning(f"复制Amazon模板到共享盘失败: {copy_exc}")
-        elif not amazon_template_path or not os.path.exists(amazon_template_path or ""):
+        if not amazon_template_path or not os.path.exists(amazon_template_path or ""):
             self.logger.warning("未找到Amazon发货模板文件，仅发送拼箱结果")
 
         ops_id = ops.get("user_id") or ""
@@ -906,8 +812,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         if forward_keys:
             self.state_manager.drop_queue_jobs_overlapping(ops_id, forward_keys)
 
-        # 运营忙碌：入队，物流仍释放
-        if self.state_manager.ops_is_busy(ops_id):
+        # 运营忙碌（含正在做不分仓）：入队，物流仍释放
+        if self.state_manager.ops_is_busy(ops_id) or self._peer_has_active_ops(ops_id):
             pos = self.state_manager.enqueue_ops_job(ops_id, job)
             self.state_manager.release_logistics_session()
             self._send_text_reply(
@@ -945,8 +851,9 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 )
             instruction_text = (
                 "【分仓拼箱】物流已审核通过，请处理。\n"
-                "请下载拼箱结果与 Amazon 模板；已默认发送模板1，如需新版格式回复【模板2】。\n"
-                "也可上传卖家后台包装信息表，机器人将自动填写并回传。"
+                + self._shipment_meta_text(job=job)
+                + "请下载拼箱结果与 Amazon 模板；已默认发送模板1，如需新版格式回复【模板2】。\n"
+                + "也可上传卖家后台包装信息表，机器人将自动填写并回传。"
             )
             self.dingtalk_api.send_text_message(corp_user_id, instruction_text)
         except Exception as e:
@@ -1044,505 +951,10 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             except Exception as exc:
                 self.logger.error(f"通知物流人员失败: {exc}")
 
-        # 进入询问领星发货单号流程
-        self.state_manager.set_waiting_for_shipment_numbers()
-        self._send_text_reply(
-            "📋 请输入需要处理的领星发货单号（每行一个）：\n\n"
-            "格式示例：\n"
-            "SP260119001\n"
-            "SP260119002\n"
-            "SP260119003\n\n"
-            "输入完成后发送，或回复【跳过】结束流程。",
-            incoming_message
-        )
-        self.logger.info("等待运营输入领星发货单号")
-
-    async def _handle_skip_shipment_numbers(self, incoming_message, user_role: str):
-        """处理跳过发货单号输入"""
-        if not self.state_manager.is_waiting_for_shipment_numbers():
-            self._send_text_reply("⚠️ 当前没有待输入的发货单号。", incoming_message)
-            return
-        
-        if not self._is_operation_or_dual(incoming_message, user_role):
-            self._send_text_reply("⚠️ 只有运营人员可以跳过此步骤。", incoming_message)
-            return
-        
-        self._send_text_reply("ℹ️ 已跳过领星发货单处理，流程结束。", incoming_message)
-        
-        # 通知物流人员
-        logistics_user_id = self.state_manager.get_logistics_user_id()
-        if logistics_user_id:
-            try:
-                normalized_id = self._normalize_recipient_id(logistics_user_id)
-                if normalized_id:
-                    self.dingtalk_api.send_text_message(
-                        normalized_id,
-                        "✅ 整个工作流程已完成，可以开始新的流程。"
-                    )
-            except Exception as exc:
-                self.logger.error(f"通知物流人员失败: {exc}")
-        
+        self._send_text_reply("✅ 流程已结束。", incoming_message)
         self._reset_workflow()
-        self.logger.info("流程结束，状态已重置")
+        self.logger.info("删除确认完成，流程结束")
 
-    async def _handle_shipment_numbers_input(self, incoming_message, text_content: str):
-        """处理运营输入的发货单号列表"""
-        # 解析发货单号（每行一个）
-        lines = [line.strip() for line in text_content.strip().split('\n') if line.strip()]
-        shipment_numbers = []
-        for line in lines:
-            # 验证格式：SP开头 + 数字
-            if re.match(r'^SP\d+$', line.upper()):
-                shipment_numbers.append(line.upper())
-            else:
-                self._send_text_reply(
-                    f"❌ 发货单号格式错误: {line}\n\n"
-                    "请输入正确格式的发货单号（如 SP260119001）",
-                    incoming_message
-                )
-                return
-        
-        if not shipment_numbers:
-            self._send_text_reply("❌ 未识别到有效的发货单号，请重新输入。", incoming_message)
-            return
-        
-        # 保存发货单号列表
-        self.state_manager.set_lingxing_shipment_numbers(shipment_numbers)
-        
-        self._send_text_reply(
-            f"📋 收到 {len(shipment_numbers)} 个发货单号：\n"
-            f"{chr(10).join(shipment_numbers)}\n\n"
-            "🔄 正在启动领星自动化处理，请稍候...",
-            incoming_message
-        )
-        
-        # 执行领星自动化处理
-        await self._process_lingxing_shipments(incoming_message, shipment_numbers)
-
-    async def _handle_customs_info_confirmation(self, incoming_message, user_role: str, text_content: str):
-        """处理物流补全清关资料后的确认"""
-        if not self.state_manager.is_waiting_for_customs_info():
-            return
-
-        logistics_user_id = self.state_manager.get_logistics_user_id()
-        if user_role != 'logistics' or not self._is_same_user(logistics_user_id, incoming_message):
-            self._send_text_reply(
-                "⚠️ 正在等待物流人员补全清关资料。\n"
-                "请物流人员在补全后回复：已补全 SPxxxx",
-                incoming_message
-            )
-            return
-
-        keyword_hit = any(word in text_content for word in ["已补全", "补全", "已完成", "完成"])
-        order_matches = re.findall(r"SP\\d+", text_content.upper())
-        pending = self.state_manager.get_pending_customs_shipments() or []
-        if not pending:
-            self._send_text_reply("⚠️ 当前没有待补全清关的发货单。", incoming_message)
-            return
-
-        if not keyword_hit and not order_matches:
-            self._send_text_reply(
-                f"⚠️ 请确认清关资料已补全后回复：已补全 {pending[0]}",
-                incoming_message
-            )
-            return
-
-        order_no = order_matches[0] if order_matches else pending[0]
-        if order_no not in pending:
-            self._send_text_reply(
-                f"⚠️ 发货单号 {order_no} 不在待补全清关列表中。\n"
-                f"当前待补全：{', '.join(pending)}",
-                incoming_message
-            )
-            return
-
-        # 仅允许从队首继续
-        if order_no != pending[0]:
-            self._send_text_reply(
-                f"⚠️ 请按顺序处理，当前待补全发货单为：{pending[0]}",
-                incoming_message
-            )
-            return
-
-        self.state_manager.clear_customs_waiting()
-
-        self._send_text_reply(
-            f"✅ 已收到补全通知，继续处理发货单：{', '.join(pending)}",
-            incoming_message
-        )
-        await self._process_customs_after_logistics_upload(
-            incoming_message,
-            pending,
-        )
-
-    async def _process_lingxing_shipments(self, incoming_message, shipment_numbers: list,
-                                          partial_results: Optional[list] = None,
-                                          lock_stock_partial: Optional[dict] = None):
-        """执行领星发货单自动化处理"""
-        import sys
-        sys.path.insert(0, str(getattr(config, 'COMMON_ROOT', config.PROJECT_ROOT.parent)))
-        try:
-            from Common.web import BrowserDriver
-            from Common.web.lingxing import LingXingPortal
-            from Common.api.lingxing_client import LingXingClient
-            from Common.api import config as api_config
-        except ImportError as exc:
-            self.logger.error(f"导入 Common 库失败: {exc}")
-            self._send_text_reply(
-                f"❌ 自动化模块加载失败: {exc}\n请联系技术支持。",
-                incoming_message
-            )
-            self._reset_workflow()
-            return
-        
-        results = list(partial_results or [])
-        state = self.state_manager.get_full_state()
-        registry_code = state.get("registry_code")
-        workflow_folder_path = state.get("workflow_folder_path")
-        shared_folder_path = state.get("shared_folder_path")
-        if not workflow_folder_path:
-            workflow_folder_path = self._create_workflow_folder()
-        if not registry_code:
-            self._send_text_reply(
-                "❌ 未获取到发票号，无法填写物流商单号/查询单号。\n"
-                "请确认物流已上传并完成登记后再重试。",
-                incoming_message
-            )
-            self._reset_workflow()
-            return
-
-        logistics_no = registry_code
-        tracking_no = registry_code
-
-        expected_transport_mode = "海派"
-        expected_logistics_channel = "海派"
-        expected_logistics_provider = "杭州平谊国际货运代理有限公司"
-
-        remark_template = "资料已上传，箱唛一式两份，{total_box_num}箱，{date}，平谊提货"
-        remark_client = None
-        if api_config.LINGXING_API_KEY and api_config.LINGXING_TOKEN_URL:
-            remark_client = LingXingClient(
-                host=api_config.LINGXING_API_HOST,
-                app_id=api_config.LINGXING_API_KEY,
-                app_secret=api_config.LINGXING_API_SECRET,
-                token_url=api_config.LINGXING_TOKEN_URL,
-                token_key=api_config.LINGXING_TOKEN_REQUEST_KEY,
-                ssl_verify=api_config.LINGXING_SSL_VERIFY,
-            )
-        lock_stock_success = list((lock_stock_partial or {}).get("success", []))
-        lock_stock_failed = list((lock_stock_partial or {}).get("failed", []))
-        lock_stock_seen = set(lock_stock_success + lock_stock_failed)
-
-        def _record_lock_stock(target_list: list, order_no: str):
-            if order_no in lock_stock_seen:
-                return
-            target_list.append(order_no)
-            lock_stock_seen.add(order_no)
-        try:
-            driver = BrowserDriver()
-            with driver.session() as page:
-                portal = LingXingPortal(page)
-
-                # 检查是否需要登录
-                portal.goto_home()
-                if portal.is_login_page():
-                    self._send_text_reply(
-                        "⚠️ 领星需要登录，请先在浏览器中登录领星后重试。",
-                        incoming_message
-                    )
-                    self._reset_workflow()
-                    return
-                
-                # 遍历处理每个发货单
-                for idx, order_no in enumerate(shipment_numbers):
-                    self.logger.info(f"开始处理发货单: {order_no}")
-                    # TODO: 需要获取物流商单号和查询单号
-                    success, msg = portal.process_shipment(
-                        order_no=order_no,
-                        logistics_no=logistics_no,
-                        tracking_no=tracking_no,
-                        expected_transport_mode=expected_transport_mode,
-                        expected_logistics_channel=expected_logistics_channel,
-                        expected_logistics_provider=expected_logistics_provider,
-                        download_dir=workflow_folder_path,
-                    )
-                    if success and remark_client:
-                        try:
-                            remark_result = await remark_client.update_shipment_remark_with_template(
-                                order_no,
-                                template=remark_template,
-                            )
-                            self.logger.info(
-                                "备注更新完成: %s old=%s | new=%s",
-                                order_no,
-                                remark_result.get("old_remark"),
-                                remark_result.get("new_remark"),
-                            )
-                        except Exception as exc:
-                            self.logger.error(f"{order_no}: 备注更新失败: {exc}")
-                        try:
-                            lock_resp = await remark_client.lock_shipment_stock([order_no])
-                            if lock_resp.get("code") in (0, "0"):
-                                _record_lock_stock(lock_stock_success, order_no)
-                                self.logger.info("库存分配成功: %s", order_no)
-                            else:
-                                _record_lock_stock(lock_stock_failed, order_no)
-                                self.logger.warning(
-                                    "库存分配失败: %s code=%s msg=%s details=%s",
-                                    order_no,
-                                    lock_resp.get("code"),
-                                    lock_resp.get("message"),
-                                    lock_resp.get("error_details"),
-                                )
-                        except Exception as exc:
-                            _record_lock_stock(lock_stock_failed, order_no)
-                            self.logger.error(f"{order_no}: 库存分配异常: {exc}")
-                    results.append((order_no, success, msg))
-                    self.logger.info(f"处理结果: {msg}")
-
-        except Exception as exc:
-            self.logger.error(f"领星自动化处理失败: {exc}", exc_info=True)
-            self._send_text_reply(
-                f"❌ 领星自动化处理失败: {exc}",
-                incoming_message
-            )
-            self._reset_workflow()
-            return
-        
-        # 汇总结果
-        success_count = sum(1 for _, success, _ in results if success)
-        fail_count = len(results) - success_count
-        
-        result_lines = []
-        for order_no, success, msg in results:
-            status_icon = "✅" if success else "❌"
-            result_lines.append(f"{status_icon} {msg}")
-
-        summary = (
-            f"📊 领星自动化处理完成\n\n"
-            f"成功: {success_count} / 失败: {fail_count}\n\n"
-            f"详细结果：\n" + "\n".join(result_lines)
-        )
-        self._send_text_reply(summary, incoming_message)
-        
-        # 通知物流人员
-        wait_for_logistics_files = False
-        logistics_user_id = self.state_manager.get_logistics_user_id()
-        if logistics_user_id:
-            try:
-                normalized_id = self._normalize_recipient_id(logistics_user_id)
-                if normalized_id:
-                    self.dingtalk_api.send_text_message(
-                        normalized_id,
-                        f"✅ 领星发货单处理完成\n成功: {success_count} / 失败: {fail_count}\n\n"
-                        "请按下方提示上传发货单和报关资料Excel文件。"
-                    )
-                    success_lines = "\n".join(lock_stock_success) if lock_stock_success else "无"
-                    failed_lines = "\n".join(lock_stock_failed) if lock_stock_failed else "无"
-                    invoice_no = self.state_manager.get_full_state().get("registry_code") or ""
-                    stock_message = (
-                        "分配库存成功：\n"
-                        f"{success_lines}\n"
-                        "分配库存失败：\n"
-                        f"{failed_lines}\n"
-                        f"发票号：{invoice_no}\n"
-                        "请去领星检查并导出发货单,自行生成报关资料，将两个Excel上传给我"
-                    )
-                    self.dingtalk_api.send_text_message(normalized_id, stock_message)
-                    wait_for_logistics_files = True
-                else:
-                    self.logger.warning(f"无法获取物流人员 {logistics_user_id} 的userid，未推送完成通知")
-            except Exception as exc:
-                self.logger.error(f"通知物流人员失败: {exc}")
-
-        if wait_for_logistics_files:
-            self.state_manager.set_waiting_for_logistics_files(expected_count=2)
-            self.logger.info("等待物流上传发货单/报关资料Excel文件")
-        else:
-            self._reset_workflow()
-            self.logger.info("领星自动化处理完成，流程结束")
-
-    async def _process_customs_after_logistics_upload(self, incoming_message, shipment_numbers: list):
-        """物流上传文件后生成清关资料并下载处理"""
-        import sys
-        sys.path.insert(0, str(getattr(config, 'COMMON_ROOT', config.PROJECT_ROOT.parent)))
-
-        if not shipment_numbers:
-            self._send_text_reply("⚠️ 未找到领星发货单号，无法生成清关资料。", incoming_message)
-            return
-
-        try:
-            from Common.web import BrowserDriver
-            from Common.web.lingxing import LingXingPortal
-        except ImportError as exc:
-            self.logger.error(f"导入 Common 库失败: {exc}")
-            self._send_text_reply(
-                f"❌ 自动化模块加载失败: {exc}\n请联系技术支持。",
-                incoming_message
-            )
-            return
-
-        state = self.state_manager.get_full_state()
-        registry_code = state.get("registry_code")
-        shared_folder_path = state.get("shared_folder_path")
-        workflow_folder_path = state.get("workflow_folder_path")
-        if not workflow_folder_path:
-            workflow_folder_path = self._create_workflow_folder()
-            self.state_manager.update_workflow_folder_path(workflow_folder_path)
-
-        if shared_folder_path and registry_code:
-            customs_download_dir = os.path.join(shared_folder_path, f"{registry_code} 报关资料&发票")
-        else:
-            customs_download_dir = os.path.join(workflow_folder_path, "customs_downloads")
-        os.makedirs(customs_download_dir, exist_ok=True)
-
-        results = []
-        customs_added_orders = []
-        try:
-            driver = BrowserDriver()
-            with driver.session() as page:
-                portal = LingXingPortal(page)
-                portal.goto_home()
-                if portal.is_login_page():
-                    self._send_text_reply(
-                        "⚠️ 领星需要登录，请先在浏览器中登录领星后重试。",
-                        incoming_message
-                    )
-                    return
-
-                for idx, order_no in enumerate(shipment_numbers):
-                    ok, msg = portal.add_customs_clearance(order_no)
-                    if not ok:
-                        if self._is_customs_missing_message(msg):
-                            pending = shipment_numbers[idx:]
-                            self.state_manager.set_waiting_for_customs_info(
-                                pending_shipments=pending,
-                                reason=msg,
-                            )
-                            self._notify_logistics_customs_missing(order_no, msg)
-                            self._send_text_reply(
-                                f"⚠️ {msg}\n已通知物流人员补全清关资料，补全后将继续处理。",
-                                incoming_message
-                            )
-                            return
-                        results.append((order_no, False, msg))
-                        continue
-                    customs_added_orders.append(order_no)
-                    results.append((order_no, True, f"{order_no}: 清关资料已提交"))
-
-                if customs_added_orders:
-                    try:
-                        download_results = portal.download_customs_files_batch(
-                            customs_added_orders,
-                            download_dir=customs_download_dir,
-                        )
-                    except Exception as exc:
-                        self.logger.error(f"清关文件批量下载失败: {exc}", exc_info=True)
-                        download_results = [(False, f"清关文件批量下载异常: {exc}")]
-                else:
-                    download_results = []
-
-        except Exception as exc:
-            self.logger.error(f"生成清关资料失败: {exc}", exc_info=True)
-            self._send_text_reply(
-                f"❌ 生成清关资料失败: {exc}",
-                incoming_message
-            )
-            return
-
-        customs_file_results = process_customs_files(customs_download_dir)
-
-        # 压缩清关资料文件夹（仅共享盘场景）
-        if shared_folder_path and registry_code:
-            try:
-                from Common.Utils.file_archive import zip_folder
-                zip_dir = os.path.join(shared_folder_path, f"{registry_code} 报关资料&发票")
-                zip_path = os.path.join(shared_folder_path, f"{registry_code} 报关资料&发票.zip")
-                if os.path.isdir(zip_dir):
-                    zip_folder(zip_dir, zip_path)
-                    try:
-                        from Common.api import send_group_text
-                        from Common.api.lingxing_client import LingXingClient
-                        from openpyxl import load_workbook
-
-                        # Find customs Excel in zip_dir
-                        excel_files = [
-                            os.path.join(zip_dir, name)
-                            for name in os.listdir(zip_dir)
-                            if name.lower().endswith((".xlsx", ".xls")) and not name.startswith("~$")
-                        ]
-                        customs_excel = None
-                        if excel_files:
-                            preferred = [p for p in excel_files if "报关资料" in os.path.basename(p)]
-                            candidates = preferred or excel_files
-                            customs_excel = max(candidates, key=lambda p: os.path.getmtime(p))
-
-                        total_box_num = ""
-                        if customs_excel:
-                            try:
-                                wb = load_workbook(customs_excel, data_only=True)
-                                if "明细单" in wb.sheetnames:
-                                    ws = wb["明细单"]
-                                    for row in range(1, (ws.max_row or 1) + 1):
-                                        cell_val = ws.cell(row=row, column=1).value
-                                        if cell_val and "合计" in str(cell_val):
-                                            total_box_num = ws.cell(row=row, column=8).value
-                                            break
-                                wb.close()
-                            except Exception:
-                                total_box_num = ""
-
-                        date_text = LingXingClient.get_next_saturday()
-                        box_text = str(total_box_num).strip() if total_box_num not in (None, "") else "未知"
-                        notify_text = f"{registry_code} {box_text}箱 {date_text} 平谊提货"
-
-                        at_mobiles = []
-                        warehouse_mobiles = getattr(config, "AGL_WAREHOUSE_AT_MOBILES", [])
-                        doc_mobiles = getattr(config, "AGL_DOC_AT_MOBILES", [])
-                        at_mobiles.extend([m for m in warehouse_mobiles if m])
-                        at_mobiles.extend([m for m in doc_mobiles if m])
-                        send_group_text(notify_text, at_mobiles=at_mobiles, at_all=False)
-                    except Exception as exc:
-                        self.logger.error(f"清关资料群通知失败: {exc}")
-            except Exception as exc:
-                self.logger.error(f"清关资料压缩失败: {exc}")
-
-        # 汇总结果
-        success_count = sum(1 for _, success, _ in results if success)
-        fail_count = len(results) - success_count
-
-        result_lines = []
-        for _, success, msg in results:
-            status_icon = "✅" if success else "❌"
-            result_lines.append(f"{status_icon} {msg}")
-
-        dl_success = sum(1 for ok, _ in download_results) if download_results is not None else 0
-        dl_fail = len(download_results) - dl_success if download_results is not None else 0
-        dl_lines = []
-        for ok, msg in download_results:
-            status_icon = "✅" if ok else "❌"
-            dl_lines.append(f"{status_icon} {msg}")
-        if not dl_lines:
-            dl_lines.append("ℹ️ 无可下载的清关文件（未成功添加清关资料）")
-
-        customs_file_summary = "\n".join(customs_file_results) if customs_file_results else "无"
-
-        summary = (
-            f"📊 清关资料处理完成\n\n"
-            f"成功: {success_count} / 失败: {fail_count}\n\n"
-            f"详细结果：\n" + "\n".join(result_lines) + "\n\n"
-            "📥 清关文件下载结果\n"
-            f"成功: {dl_success} / 失败: {dl_fail}\n\n"
-            + "\n".join(dl_lines)
-            + "\n\n🧾 清关文件重命名结果（按运单信息!M8）\n"
-            + customs_file_summary
-        )
-        self._send_text_reply(summary, incoming_message)
-
-        self._reset_workflow()
-        self.logger.info("清关资料处理完成，流程结束")
-
-    
     def _looks_like_lcl_packing_result(self, file_path: str) -> bool:
         try:
             xl = pd.ExcelFile(file_path)
@@ -1573,6 +985,12 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 u = sn.upper()
                 if u not in {str(x).upper() for x in shipping_numbers}:
                     shipping_numbers.append(u)
+            info = None
+            try:
+                info = extract_shipment_info(packing_file_path)
+            except Exception:
+                pass
+            st = self.state_manager.state
             job = {
                 "logistics_file_path": None,
                 "packing_result_path": result_path,
@@ -1581,8 +999,10 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 "logistics_user_id": self.state_manager.get_logistics_user_id() or "",
                 "conversation_id": getattr(incoming_message, "conversation_id", None),
                 "workflow_folder_path": self.state_manager.get_workflow_folder_path(),
-                "registry_code": self.state_manager.get_full_state().get("registry_code"),
-                "shared_folder_path": self.state_manager.get_full_state().get("shared_folder_path"),
+                "shop": getattr(info, "shop", None) or st.get("shop"),
+                "shop_full": getattr(info, "shop_full", None) or st.get("shop_full"),
+                "country": getattr(info, "country", None) or st.get("country"),
+                "transport_method": getattr(info, "transport_method", None) or st.get("transport_method"),
                 "status": "WAIT_AMAZON",
                 "source": "ops_manual",
             }
@@ -1594,6 +1014,16 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
 
             # 有进行中任务则更新路径（运营优先覆盖物流转发）；否则新建 active
             existing = (self.state_manager.state.get("ops_active") or {}).get(str(sender_id))
+            if existing is None and self._peer_has_active_ops(str(sender_id)):
+                pos = self.state_manager.enqueue_ops_job(str(sender_id), job)
+                self._send_text_reply(
+                    f"当前正在处理不分仓拼箱。本单（分仓）已加入队列（第 {pos} 位）。\n"
+                    f"拼箱结果：{os.path.basename(result_path)}\n"
+                    "请先完成当前单，完成后会自动推送。"
+                    f"{drop_note}",
+                    incoming_message,
+                )
+                return
             if existing:
                 existing = dict(existing)
                 existing["packing_result_path"] = result_path
@@ -1602,10 +1032,14 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 existing["shipping_numbers"] = shipping_numbers or existing.get("shipping_numbers") or []
                 existing["status"] = "WAIT_AMAZON"
                 existing["source"] = "ops_manual"
+                for key in ("shop", "shop_full", "country", "transport_method"):
+                    if job.get(key):
+                        existing[key] = job[key]
                 self.state_manager.activate_ops_job(str(sender_id), existing)
                 self._send_text_reply(
                     "✅ 已用您上传的拼箱数据更新当前任务，并重新生成 Amazon 模板。\n"
-                    "与物流转发重复时以您上传为准。"
+                    + self._shipment_meta_text(job=existing)
+                    + "与物流转发重复时以您上传为准。"
                     f"{drop_note}\n"
                     "可继续上传 Amazon「包装箱包装信息」文件，或回复【模板2】。",
                     incoming_message,
@@ -1614,7 +1048,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 self.state_manager.activate_ops_job(str(sender_id), job)
                 self._send_text_reply(
                     "【分仓拼箱】已登记您上传的拼箱数据（无需物流转发）。\n"
-                    "已发送拼箱结果与 Amazon 模板1；如需新版格式回复【模板2】。\n"
+                    + self._shipment_meta_text(job=job)
+                    + "已发送拼箱结果与 Amazon 模板1；如需新版格式回复【模板2】。\n"
                     "上传卖家后台包装信息表后，机器人将自动填写并回传。"
                     f"{drop_note}",
                     incoming_message,
@@ -1813,16 +1248,10 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         # 关键变量展示
         message += (
             "\n🔧 关键变量：\n"
-            f"发票号：{state.get('registry_code') or '未设置'}\n"
-            f"共享盘路径：{state.get('shared_folder_path') or '未设置'}\n"
             f"流程目录：{state.get('workflow_folder_path') or '未设置'}\n"
             f"物流用户：{state.get('logistics_user_id') or '未设置'}\n"
             f"运营用户：{state.get('operation_user_id') or '未设置'}\n"
-            f"发货单号(原)：{state.get('shipping_numbers') or '未设置'}\n"
-            f"领星发货单号：{', '.join(state.get('lingxing_shipment_numbers') or []) or '未设置'}\n"
-            f"待补全清关：{', '.join(state.get('pending_customs_shipments') or []) or '无'}\n"
-            f"物流文件已收：{len(state.get('logistics_files_received') or [])}"
-            f"/{state.get('logistics_files_expected') or '未设置'}\n"
+            f"发货单号：{state.get('shipping_numbers') or '未设置'}\n"
         )
         
         self._send_text_reply(message, incoming_message)
@@ -1849,7 +1278,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             return
         parts = text_content.split(maxsplit=1)
         if len(parts) < 2:
-            self._send_text_reply("⚠️ 用法：/跳转 阶段名（分5仓拼箱/领星编辑/生成清关资料）", incoming_message)
+            self._send_text_reply("⚠️ 用法：/跳转 阶段名（分5仓拼箱）", incoming_message)
             return
         stage_alias = parts[1].strip()
         try:
@@ -1859,12 +1288,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             return
 
         required = []
-        if new_status == WorkflowState.WAIT_LOGISTICS_FILES:
-            required = ["发票号", "共享盘路径", "领星发货单号"]
-        elif new_status == WorkflowState.WAIT_DELETE_CONFIRMATION:
-            required = ["发货单号(原)"]
-        elif new_status == WorkflowState.WAIT_SHIPMENT_NUMBERS:
-            required = ["领星发货单号(可选)"]
+        if new_status == WorkflowState.WAIT_DELETE_CONFIRMATION:
+            required = ["发货单号"]
 
         req_text = "、".join(required) if required else "无"
         self._send_text_reply(
@@ -1882,7 +1307,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             return
         payload = text_content[len("/设置"):].strip()
         if not payload:
-            self._send_text_reply("⚠️ 用法：/设置 发票号=25L03（多项请换行）", incoming_message)
+            self._send_text_reply("⚠️ 用法：/设置 发货单号=SP260119001（多项请换行）", incoming_message)
             return
 
         updates = {}
@@ -1895,16 +1320,9 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             if not key:
                 continue
 
-            if key in ("发票号",):
-                updates["registry_code"] = value
-            elif key in ("共享盘路径", "共享盘", "路径"):
-                updates["shared_folder_path"] = value
-            elif key in ("流程目录", "流程文件夹", "本地目录"):
+            if key in ("流程目录", "流程文件夹", "本地目录"):
                 updates["workflow_folder_path"] = value
-            elif key in ("发货单号", "领星发货单号", "单号", "发货单号列表"):
-                numbers = [v for v in re.split(r"[\\s,;]+", value) if v]
-                updates["lingxing_shipment_numbers"] = numbers
-            elif key in ("原发货单号",):
+            elif key in ("发货单号", "单号", "发货单号列表", "原发货单号"):
                 updates["shipping_numbers"] = value
 
         if not updates:
@@ -1941,18 +1359,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             WorkflowState.WAIT_DELETE_CONFIRMATION: (
                 "🟡 已发送最终文件，等待运营确认是否删除发货单",
                 "运营请回复\"删除\"或\"不删除\""
-            ),
-            WorkflowState.WAIT_SHIPMENT_NUMBERS: (
-                "🟡 等待运营输入领星发货单号",
-                "运营请回复发货单号（每行一个）或回复\"跳过\""
-            ),
-            WorkflowState.WAIT_CUSTOMS_INFO: (
-                "🟡 等待物流补全清关资料",
-                "物流补全后回复\"已补全 SPxxxx\""
-            ),
-            WorkflowState.WAIT_LOGISTICS_FILES: (
-                "🟡 等待物流上传发货单/报关资料文件",
-                "物流上传发货单和报关资料Excel文件"
             ),
         }
         return status_detail_map.get(status, (f"未知状态: {status}", ""))
@@ -2193,8 +1599,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             allowed_statuses = {
                 WorkflowState.LOGISTICS_CONFIRMED,
                 WorkflowState.WAIT_DELETE_CONFIRMATION,
-                WorkflowState.WAIT_SHIPMENT_NUMBERS,
-                WorkflowState.WAIT_LOGISTICS_FILES,
             }
             if current_status not in allowed_statuses:
                 self._send_text_reply(
@@ -2324,37 +1728,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         except Exception as e:
             self.logger.error(f"发送文本回复失败: {e}")
 
-    def _is_customs_missing_message(self, msg: str) -> bool:
-        """判断清关缺失信息提示"""
-        if not msg:
-            return False
-        return any(
-            key in msg
-            for key in ("收货仓库信息不完整", "清关产品信息不完整")
-        )
-
-    def _notify_logistics_customs_missing(self, order_no: str, reason: str):
-        """通知物流补全清关资料"""
-        logistics_user_id = self.state_manager.get_logistics_user_id()
-        if not logistics_user_id:
-            self.logger.warning("未找到物流人员ID，无法发送清关补全通知")
-            return
-
-        normalized_id = self._normalize_recipient_id(logistics_user_id)
-        if not normalized_id:
-            self.logger.warning(f"无法获取物流人员 {logistics_user_id} 的userid，未推送清关补全通知")
-            return
-
-        message = (
-            f"⚠️ 清关资料缺失，请补全后回复：已补全 {order_no}\n\n"
-            f"发货单号：{order_no}\n"
-            f"缺失原因：{reason}"
-        )
-        try:
-            self.dingtalk_api.send_text_message(normalized_id, message)
-        except Exception as exc:
-            self.logger.error(f"发送清关补全通知失败: {exc}")
-    
     def _send_excel_copy_to_others(self, media_id: str, file_name: str, file_description: str = "Excel文件"):
         """
         抄送Excel文件给OTHER_USERS配置的用户

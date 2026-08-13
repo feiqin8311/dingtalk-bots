@@ -123,6 +123,12 @@ RESET_TEXT = """已重置当前选择。
 回复【重置】➡️ 放弃本次并重新选择业务
 """
 
+RESET_STILL_PACKING_TEXT = """已重置菜单选择。
+
+您还有进行中的拼箱任务，请继续处理当前单。
+回复【取消】可放弃当前拼箱任务。
+"""
+
 
 class LogisticsRouter(dingtalk_stream.ChatbotHandler):
     def __init__(self, *, logger: logging.Logger, config: LogisticsBotConfig):
@@ -133,6 +139,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self.split_handler = PdfSplitBotHandler(logger=logger, config=config)
         self.pinxiang_handler = PinxiangBotHandler(logger=logger, config=config)
         self.lcl_handler = LclBotHandler(logger=logger, config_obj=config)
+        self.pinxiang_handler.peer_promoter = self.lcl_handler
+        self.lcl_handler.peer_promoter = self.pinxiang_handler
         self._branch_lock = threading.Lock()
         self._selected_branch_by_user: dict[str, RouteName] = self._load_branch_state()
         self._call_log = self._build_call_log_store()
@@ -152,7 +160,12 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self._log_route_event(callback.data, route=route, user_id=user_id)
         if route == "reset":
             self._reset_user(user_id)
-            await self._send_text(callback.data, RESET_TEXT)
+            still_packing = self._handler_has_work(self.pinxiang_handler, user_id) or self._handler_has_work(
+                self.lcl_handler, user_id
+            )
+            await self._send_text(
+                callback.data, RESET_STILL_PACKING_TEXT if still_packing else RESET_TEXT
+            )
             return AckMessage.STATUS_OK, "RESET"
         if route == "select_cp":
             self._set_branch(user_id, "cp")
@@ -286,16 +299,12 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             return "reset"
         # 拼箱进行中（选运营 1/2、确认、运营上传）优先于全局菜单，
         # 否则回复「1. 柯鹏翔」会被误判为「1. 发货单核对」
-        if user_id and getattr(self.pinxiang_handler, "has_pending", lambda _u: False)(user_id):
+        if user_id and self._handler_has_work(self.pinxiang_handler, user_id):
             return "pinxiang"
+        if user_id and self._handler_has_work(self.lcl_handler, user_id):
+            return "lcl"
         selected = self._selected_branch_by_user.get(user_id or "")
-        lcl_pending = bool(
-            user_id and getattr(self.lcl_handler, "has_pending", lambda _u: False)(user_id)
-        )
         if selected == "pinxiang":
-            # 不分仓已结束但分支未切：分仓还有单则进 lcl（模板2 / 装箱表）
-            if lcl_pending:
-                return "lcl"
             return "pinxiang"
         if selected == "lcl":
             return "lcl"
@@ -314,6 +323,14 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
                 return "split"
             return selected
         return "help"
+
+    @staticmethod
+    def _handler_has_work(handler, user_id: str) -> bool:
+        """当前单或物流会话（不含排队）。"""
+        if not handler or not user_id:
+            return False
+        fn = getattr(handler, "has_pending", None)
+        return bool(fn(user_id)) if callable(fn) else False
 
     @staticmethod
     def _normalize_command(text: str) -> str:

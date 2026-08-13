@@ -153,12 +153,19 @@ class LogisticsRouterTests(unittest.TestCase):
         self.router._reset_user("u1")
         self.assertNotIn("u1", self.router._selected_branch_by_user)
 
-    def test_reset_then_menu_works_while_lcl_pending(self):
-        """重置清的是分支，不该被分仓进行中任务卡住无法选菜单。"""
+    def test_reset_keeps_ops_on_active_packing_job(self):
+        """运营还有分仓单时，重置只清菜单，下一条仍进分仓。"""
         self.router._set_branch("u1", "pinxiang")
         self.router.lcl_handler.has_pending = MagicMock(return_value=True)
         self.router._reset_user("u1")
-        self.assertEqual(self.router._route({"text": {"content": "1"}}, user_id="u1"), "select_cp")
+        self.assertEqual(self.router._route({"text": {"content": "模板2"}}, user_id="u1"), "lcl")
+        self.assertEqual(self.router._route({"text": {"content": "1"}}, user_id="u1"), "lcl")
+
+    def test_active_pinxiang_wins_over_lcl(self):
+        """两单都在时先做不分仓，分仓留在队列。"""
+        self.router.pinxiang_handler.has_pending = MagicMock(return_value=True)
+        self.router.lcl_handler.has_pending = MagicMock(return_value=True)
+        self.assertEqual(self.router._route({"text": {"content": "模板2"}}, user_id="u1"), "pinxiang")
 
     def test_pinxiang_lcl_workbook_handoff_redispatches(self):
         import asyncio
