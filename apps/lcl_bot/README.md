@@ -28,7 +28,8 @@
 ## 依赖
 
 - monorepo `requirements.txt` 已含 `pandas`
-- 领星登记/删单/清关依赖宿主机上的 `Common` 包（`LCL_COMMON_ROOT`，默认 monorepo 上级 `yida/`）
+- 领星删单用本仓库 `lingxing_api.py`（`LINGXING_*`）
+- 登记/清关仍依赖宿主机 `Common`（`LCL_COMMON_ROOT`）
 
 ## 注意
 

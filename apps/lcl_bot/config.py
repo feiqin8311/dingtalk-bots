@@ -101,7 +101,12 @@ AMAZON_TEMPLATE_SOURCE_FILE_V2 = os.path.join(
     "ManifestFileUpload_Template_IncludeCasePack_IncludeExpirationDate_IncludeMLC_MPL2.xlsx",
 )
 
-LINGXING_SSL_VERIFY = os.getenv("LINGXING_SSL_VERIFY", "true").lower() == "true"
+LINGXING_API_HOST = os.getenv("LINGXING_API_HOST", "http://121.41.4.126:3188")
+LINGXING_API_KEY = os.getenv("LINGXING_API_KEY", "")
+LINGXING_API_SECRET = os.getenv("LINGXING_API_SECRET", "")
+LINGXING_TOKEN_URL = os.getenv("LINGXING_TOKEN_URL", "http://121.41.4.126:3721/token")
+LINGXING_TOKEN_REQUEST_KEY = os.getenv("LINGXING_TOKEN_REQUEST_KEY", "") or LINGXING_API_KEY
+LINGXING_SSL_VERIFY = os.getenv("LINGXING_SSL_VERIFY", "false").lower() == "true"
 
 STATE_FILE_PATH = os.getenv(
     "LCL_STATE_FILE_PATH",

@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -77,14 +76,17 @@ def _generate_sign(app_key: str, request_params: Dict[str, Any]) -> str:
 class LingXingClient:
     def __init__(self) -> None:
         self.host = config.LINGXING_API_HOST
-        self.app_key = config.LINGXING_APP_KEY
-        self.app_secret = config.LINGXING_APP_SECRET
+        self.app_key = config.LINGXING_API_KEY
+        self.app_secret = config.LINGXING_API_SECRET
         self.token_url = config.LINGXING_TOKEN_URL
-        self.token_key = config.LINGXING_TOKEN_KEY or self.app_key
+        self.token_key = config.LINGXING_TOKEN_REQUEST_KEY or self.app_key
         self.ssl_verify = config.LINGXING_SSL_VERIFY
 
         if not self.host or not self.app_key or not self.token_url or not self.token_key:
-            raise LingXingApiError("领星OpenAPI配置缺失，请检查环境变量 LINGXING_API_HOST/LINGXING_APP_KEY/LINGXING_TOKEN_URL/LINGXING_TOKEN_KEY")
+            raise LingXingApiError(
+                "领星OpenAPI配置缺失，请检查环境变量 "
+                "LINGXING_API_HOST/LINGXING_API_KEY/LINGXING_TOKEN_URL/LINGXING_TOKEN_REQUEST_KEY"
+            )
 
     async def _get_access_token(self) -> str:
         async with aiohttp.ClientSession(trust_env=True) as session:
@@ -140,6 +142,8 @@ class LingXingClient:
 
 
 async def delete_shipment_list(shipment_nos: List[str]) -> Dict[str, Any]:
+    if not shipment_nos:
+        raise LingXingApiError("缺少发货单号列表")
     client = LingXingClient()
     payload = {"shipment_nos": shipment_nos}
     return await client.request("/basicOpen/openapi/fbaShipment/deleteShipmentList", "POST", req_body=payload)
