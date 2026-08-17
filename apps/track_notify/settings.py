@@ -29,6 +29,11 @@ class TrackNotifyConfig:
     # 平谊 getTrack 超时（默认 60）；并发时偶发慢，配合客户端重试
     pingyi_timeout_sec: float
     pingyi_retries: int
+    meitong_base_url: str
+    meitong_username: str
+    meitong_password: str
+    meitong_timeout_sec: float
+    meitong_retries: int
     gateway_base_url: str
     gateway_api_key: str
     gateway_timeout_sec: float
@@ -69,10 +74,10 @@ def _parse_carrier_keywords() -> tuple[str, ...]:
     raw = (
         os.getenv("TRACK_CARRIER_KEYWORDS")
         or os.getenv("TRACK_CARRIER_KEYWORD")
-        or "平谊,龙舟"
+        or "平谊,龙舟,美通"
     ).strip()
     parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
-    return tuple(parts) if parts else ("平谊", "龙舟")
+    return tuple(parts) if parts else ("平谊", "龙舟", "美通")
 
 
 def load_config_from_env() -> TrackNotifyConfig:
@@ -123,6 +128,15 @@ def load_config_from_env() -> TrackNotifyConfig:
         pingyi_retries = 2
     pingyi_retries = max(0, min(5, pingyi_retries))
     try:
+        meitong_timeout = float((os.getenv("MEITONG_TIMEOUT_SEC") or "30").strip())
+    except ValueError:
+        meitong_timeout = 30.0
+    try:
+        meitong_retries = int((os.getenv("MEITONG_RETRIES") or "2").strip())
+    except ValueError:
+        meitong_retries = 2
+    meitong_retries = max(0, min(5, meitong_retries))
+    try:
         gateway_timeout = float((os.getenv("LOGISTICS_GATEWAY_TIMEOUT_SEC") or "240").strip())
     except ValueError:
         gateway_timeout = 240.0
@@ -164,6 +178,11 @@ def load_config_from_env() -> TrackNotifyConfig:
         pingyi_app_key=key,
         pingyi_timeout_sec=max(15.0, pingyi_timeout),
         pingyi_retries=pingyi_retries,
+        meitong_base_url=(os.getenv("MEITONG_BASE_URL") or "https://www.szaaf.com").strip(),
+        meitong_username=(os.getenv("MEITONG_USERNAME") or "").strip(),
+        meitong_password=(os.getenv("MEITONG_PASSWORD") or "").strip(),
+        meitong_timeout_sec=max(10.0, meitong_timeout),
+        meitong_retries=meitong_retries,
         gateway_base_url=(
             os.getenv("LOGISTICS_GATEWAY_BASE_URL")
             or "http://host.docker.internal:18743"

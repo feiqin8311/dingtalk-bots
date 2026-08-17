@@ -82,23 +82,22 @@ def filter_report_item_for_user(
     full_detail_user_id: str,
 ) -> ReportItem | None:
     """
-    物流人员：物流详情只保留「有日期」的节点行；全无日期则本行不推给该用户。
-    总览接收人（柯鹏翔）：完整详情不动。
+    物流详情只保留「有日期」的节点行（含总览接收人）。
+    全无日期：不推物流人员；柯鹏翔仍收（问题行 / 纯无日期节点）。
     返回 None 表示该用户 Excel 不写此行。
     """
-    if (user_id or "").strip() == (full_detail_user_id or "").strip():
-        return item
     text = (item.detail or item.message or "").strip()
     if not text:
         return item
     lines = [ln for ln in text.splitlines() if ln.strip()]
     dated = [ln.strip() for ln in lines if detail_line_has_date(ln)]
-    if not dated:
-        return None
-    if len(dated) == len(lines):
+    if dated:
+        if len(dated) == len(lines):
+            return item
+        return replace(item, detail="\n".join(dated))
+    if (user_id or "").strip() == (full_detail_user_id or "").strip():
         return item
-    new_detail = "\n".join(dated)
-    return replace(item, detail=new_detail)
+    return None
 
 
 def format_shipped_at(value: date | datetime | str | None) -> str:

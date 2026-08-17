@@ -154,9 +154,9 @@ class ExcelExportTests(unittest.TestCase):
         self.assertFalse(detail_line_has_date("已提柜"))
         self.assertFalse(detail_line_has_date("货物已送达 FC 场地"))
 
-    def test_filter_undated_for_logistics_keep_full_for_kpx(self):
+    def test_filter_mixed_keep_dated_for_all(self):
         detail = (
-            "2026-07-29 出发地 中国宁波\n"
+            "2026-08-13 出发地 中国宁波\n"
             "已到达卸货港\n"
             "已提柜\n"
             "货物已送达 FC 场地"
@@ -169,16 +169,17 @@ class ExcelExportTests(unittest.TestCase):
             detail=detail,
             event_keys=["lz:ningbo", "lz:pod", "lz:pickup", "lz:fc"],
         )
+        only_dated = "2026-08-13 出发地 中国宁波"
         logistics = filter_report_item_for_user(
             item, "17409662804279906", full_detail_user_id=KEPENGXIANG_USER_ID
         )
         assert logistics is not None
-        self.assertEqual(logistics.detail, "2026-07-29 出发地 中国宁波")
+        self.assertEqual(logistics.detail, only_dated)
         kpx = filter_report_item_for_user(
             item, KEPENGXIANG_USER_ID, full_detail_user_id=KEPENGXIANG_USER_ID
         )
         assert kpx is not None
-        self.assertEqual(kpx.detail, detail)
+        self.assertEqual(kpx.detail, only_dated)
 
     def test_filter_all_undated_omit_logistics(self):
         item = ReportItem(

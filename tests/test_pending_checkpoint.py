@@ -137,6 +137,11 @@ class ScheduleAndDeliverTests(unittest.TestCase):
                 pingyi_app_key="",
                 pingyi_timeout_sec=60.0,
                 pingyi_retries=1,
+                meitong_base_url="",
+                meitong_username="",
+                meitong_password="",
+                meitong_timeout_sec=30.0,
+                meitong_retries=1,
                 gateway_base_url="",
                 gateway_api_key="",
                 gateway_timeout_sec=60.0,
@@ -170,7 +175,7 @@ class ScheduleAndDeliverTests(unittest.TestCase):
                 event_key="lz:pod",
                 message="m",
                 user_ids=["u1", "u2"],
-                detail="已到达卸货港",
+                detail="2026-08-01 已到达卸货港",
                 event_keys=["lz:pod"],
             )
             config = _cfg(state_dir)

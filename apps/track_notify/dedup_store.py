@@ -71,6 +71,48 @@ class TrackStateStore:
             """
         )
         self._conn.commit()
+        self._migrate_reopen_undated_longzhou()
+
+    def _migrate_reopen_undated_longzhou(self) -> None:
+        """
+        历史把无日期的 lz:pod/pickup/fc 记成最终 key，补日期后无法再推。
+        一次性改挂 :undated；之后有日期走原 key。
+        """
+        reopen = ("lz:pod", "lz:pickup", "lz:fc")
+        with self._lock:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)"
+            )
+            row = self._conn.execute(
+                "SELECT v FROM meta WHERE k='reopen_undated_lz'"
+            ).fetchone()
+            if row and str(row[0]) == "1":
+                return
+            for key in reopen:
+                undated = f"{key}:undated"
+                old_rows = self._conn.execute(
+                    "SELECT shipment_key FROM notified_events WHERE event_key=?",
+                    (key,),
+                ).fetchall()
+                for (shipment_key,) in old_rows:
+                    exists = self._conn.execute(
+                        "SELECT 1 FROM notified_events WHERE shipment_key=? AND event_key=? LIMIT 1",
+                        (shipment_key, undated),
+                    ).fetchone()
+                    if exists:
+                        self._conn.execute(
+                            "DELETE FROM notified_events WHERE shipment_key=? AND event_key=?",
+                            (shipment_key, key),
+                        )
+                    else:
+                        self._conn.execute(
+                            "UPDATE notified_events SET event_key=? WHERE shipment_key=? AND event_key=?",
+                            (undated, shipment_key, key),
+                        )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (k, v) VALUES ('reopen_undated_lz', '1')"
+            )
+            self._conn.commit()
 
     def is_checked(self, record_id: str) -> bool:
         with self._lock:

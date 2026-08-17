@@ -13,7 +13,13 @@ if str(APP) not in sys.path:
 
 from dedup_store import TrackStateStore  # noqa: E402
 from dingtalk_table import TableRow  # noqa: E402
-from milestones import filter_new_milestones, match_milestone, milestone_label  # noqa: E402
+from milestones import (  # noqa: E402
+    event_has_date,
+    filter_new_milestones,
+    match_milestone,
+    milestone_label,
+    notify_event_key,
+)
 from pingyi_client import TrackEvent, TrackShipment  # noqa: E402
 from runner import _emit_events  # noqa: E402
 
@@ -69,6 +75,47 @@ class MatchMilestoneTests(unittest.TestCase):
         )
         self.assertIsNone(match_milestone(_ev("海关查验中"), "longzhou"))
 
+    def test_meitong_requested_nodes(self):
+        self.assertEqual(
+            match_milestone(
+                _ev("您的订单实际送仓时间为：2026-08-14 23:59:59"), "meitong"
+            ),
+            "mt:wh_actual",
+        )
+        self.assertEqual(
+            match_milestone(
+                _ev("您的订单预计送仓时间为：2026-08-14 23:59:56"), "meitong"
+            ),
+            "mt:wh_eta",
+        )
+        self.assertEqual(
+            match_milestone(_ev("您的订单已抵达清关地-比利时"), "meitong"),
+            "mt:customs",
+        )
+        self.assertEqual(
+            match_milestone(_ev("您的订单已抵达清关地-德国"), "meitong"),
+            "mt:customs",
+        )
+        self.assertEqual(
+            match_milestone(_ev("您的订单已抵达清关地"), "meitong"),
+            "mt:customs",
+        )
+        self.assertEqual(
+            match_milestone(
+                _ev("预配班列：预计2026-07-29发车，预计2026-08-18到达"), "meitong"
+            ),
+            "mt:rail",
+        )
+        self.assertEqual(
+            match_milestone(_ev("您的订单已于【宁波仓】仓库监装出库"), "meitong"),
+            "mt:outbound",
+        )
+        self.assertIsNone(match_milestone(_ev("预配船期：预计2026-07-22开船"), "meitong"))
+        self.assertIsNone(match_milestone(_ev("预约送仓时间：2026-04-28 09:57:58。"), "meitong"))
+        self.assertIsNone(match_milestone(_ev("您的订单已于2026-07-26 09:38:47离港。"), "meitong"))
+        self.assertEqual(milestone_label("mt:wh_actual"), "实际送仓")
+        self.assertEqual(milestone_label("mt:customs:undated"), "抵达清关地")
+
     def test_longzhou_bilingual_api_text_still_matches(self):
         # 龙舟 API 常带英文后缀，匹配仍按关键字
         self.assertEqual(
@@ -102,7 +149,15 @@ class MatchMilestoneTests(unittest.TestCase):
         self.assertEqual(milestone_label("lz:pod"), "已到达卸货港")
         self.assertEqual(milestone_label("lz:pickup"), "已提柜")
         self.assertEqual(milestone_label("lz:fc"), "货物已送达 FC 场地")
+        self.assertEqual(milestone_label("lz:fc:undated"), "货物已送达 FC 场地")
         self.assertEqual(milestone_label("py:KC"), "船只从始发港离港")
+
+    def test_event_has_date_and_notify_key(self):
+        self.assertTrue(event_has_date(_ev("已提柜", when="2026-08-13")))
+        self.assertTrue(event_has_date(_ev("已提柜", when="2026-08-13 10:00:00")))
+        self.assertFalse(event_has_date(_ev("已提柜", when="")))
+        self.assertEqual(notify_event_key("lz:fc", True), "lz:fc")
+        self.assertEqual(notify_event_key("lz:fc", False), "lz:fc:undated")
 
     def test_filter_multiple_and_dedupe_key(self):
         events = [
@@ -185,6 +240,181 @@ class EmitIncrementalTests(unittest.TestCase):
             )
             self.assertEqual(n2, 0)
             self.assertEqual(bucket2, [])
+            store.close()
+
+    def test_undated_then_dated_reopens(self):
+        logger = logging.getLogger("test_emit")
+        row = TableRow(
+            record_id="r3",
+            invoice_no="26EA148",
+            brand="EZARC",
+            country="英国",
+            carrier="龙舟",
+            fba_codes=["FBA15LXY8QRX"],
+            logistics_nos=["AL0-WJGKPUMD5XQXA"],
+            eta_date=None,
+            delivered_at=None,
+        )
+        undated = TrackShipment(
+            reference_no="AL0",
+            tracking_no="AL0",
+            destination_country="",
+            track_status="",
+            track_status_name="",
+            events=[
+                _ev("出发地 中国宁波", when="2026-07-04"),
+                _ev("已到达卸货港", when=""),
+                _ev("已提柜", when=""),
+                _ev("货物已送达 FC 场地", when=""),
+            ],
+        )
+        dated_later = TrackShipment(
+            reference_no="AL0",
+            tracking_no="AL0",
+            destination_country="",
+            track_status="",
+            track_status_name="",
+            events=[
+                _ev("出发地 中国宁波", when="2026-07-04"),
+                _ev("已到达卸货港", when="2026-08-01"),
+                _ev("已提柜", when="2026-08-10"),
+                _ev("货物已送达 FC 场地", when="2026-08-16"),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TrackStateStore(Path(tmp) / "s.sqlite3")
+            bucket: list = []
+            n = _emit_events(
+                row=row,
+                shipment=undated,
+                shipment_key="AL0-WJGKPUMD5XQXA",
+                display_code="AL0-WJGKPUMD5XQXA",
+                kind="longzhou",
+                user_ids=["uid1"],
+                store=store,
+                bucket=bucket,
+                logger=logger,
+            )
+            self.assertEqual(n, 1)
+            self.assertEqual(
+                bucket[0].event_keys,
+                ["lz:ningbo", "lz:pod:undated", "lz:pickup:undated", "lz:fc:undated"],
+            )
+            self.assertEqual(
+                bucket[0].detail,
+                "2026-07-04 出发地 中国宁波\n已到达卸货港\n已提柜\n货物已送达 FC 场地",
+            )
+            for ek in bucket[0].event_keys:
+                store.mark_event("AL0-WJGKPUMD5XQXA", ek, "sent")
+
+            # 仍无日期：不再推
+            bucket2: list = []
+            n2 = _emit_events(
+                row=row,
+                shipment=undated,
+                shipment_key="AL0-WJGKPUMD5XQXA",
+                display_code="AL0-WJGKPUMD5XQXA",
+                kind="longzhou",
+                user_ids=["uid1"],
+                store=store,
+                bucket=bucket2,
+                logger=logger,
+            )
+            self.assertEqual(n2, 0)
+
+            # 补上日期：三个节点再推一次
+            bucket3: list = []
+            n3 = _emit_events(
+                row=row,
+                shipment=dated_later,
+                shipment_key="AL0-WJGKPUMD5XQXA",
+                display_code="AL0-WJGKPUMD5XQXA",
+                kind="longzhou",
+                user_ids=["uid1"],
+                store=store,
+                bucket=bucket3,
+                logger=logger,
+            )
+            self.assertEqual(n3, 1)
+            self.assertEqual(bucket3[0].event_keys, ["lz:pod", "lz:pickup", "lz:fc"])
+            self.assertEqual(
+                bucket3[0].detail,
+                "2026-08-01 已到达卸货港\n2026-08-10 已提柜\n2026-08-16 货物已送达 FC 场地",
+            )
+            store.close()
+
+    def test_legacy_undated_marks_reopen_after_migrate(self):
+        logger = logging.getLogger("test_emit")
+        row = TableRow(
+            record_id="r4",
+            invoice_no="26X",
+            brand="Y",
+            country="英国",
+            carrier="龙舟",
+            fba_codes=["FBA1"],
+            logistics_nos=["AL0"],
+            eta_date=None,
+            delivered_at=None,
+        )
+        shipment = TrackShipment(
+            reference_no="AL0",
+            tracking_no="AL0",
+            destination_country="",
+            track_status="",
+            track_status_name="",
+            events=[
+                _ev("出发地 中国宁波", when="2026-07-04"),
+                _ev("已到达卸货港", when="2026-08-01"),
+                _ev("已提柜", when=""),
+                _ev("货物已送达 FC 场地", when="2026-08-16"),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            import sqlite3
+
+            db = Path(tmp) / "s.sqlite3"
+            con = sqlite3.connect(db)
+            con.execute(
+                """
+                CREATE TABLE notified_events (
+                    shipment_key TEXT NOT NULL,
+                    event_key TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (shipment_key, event_key)
+                )
+                """
+            )
+            for key in ("lz:ningbo", "lz:pod", "lz:pickup", "lz:fc"):
+                con.execute(
+                    "INSERT INTO notified_events (shipment_key, event_key, message) VALUES (?,?,?)",
+                    ("AL0", key, "old"),
+                )
+            con.commit()
+            con.close()
+
+            store = TrackStateStore(db)
+            self.assertFalse(store.has_event("AL0", "lz:pod"))
+            self.assertTrue(store.has_event("AL0", "lz:pod:undated"))
+            self.assertTrue(store.has_event("AL0", "lz:ningbo"))
+            bucket: list = []
+            n = _emit_events(
+                row=row,
+                shipment=shipment,
+                shipment_key="AL0",
+                display_code="AL0",
+                kind="longzhou",
+                user_ids=["uid1"],
+                store=store,
+                bucket=bucket,
+                logger=logger,
+            )
+            self.assertEqual(n, 1)
+            self.assertEqual(bucket[0].event_keys, ["lz:pod", "lz:fc"])
+            self.assertEqual(
+                bucket[0].detail,
+                "2026-08-01 已到达卸货港\n2026-08-16 货物已送达 FC 场地",
+            )
             store.close()
 
     def test_emit_multiple_new_in_one_cell(self):

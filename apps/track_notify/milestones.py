@@ -25,6 +25,15 @@ _LONGZHOU: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("lz:fc", ("货物已送达fc场地", "货物已送达FC场地")),
 )
 
+# 美通：前缀匹配，后面的国家/仓库/时间不固定。先匹配「实际送仓」以免落到「预计送仓」。
+_MEITONG: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("mt:wh_actual", ("您的订单实际送仓时间",)),
+    ("mt:wh_eta", ("您的订单预计送仓时间",)),
+    ("mt:customs", ("您的订单已抵达清关地",)),
+    ("mt:rail", ("预配班列",)),
+    ("mt:outbound", ("仓库监装出库",)),
+)
+
 # Excel/通知展示用固定中文节点名（不暴露 API 中英混写原文）
 _LABELS: dict[str, str] = {
     "py:KC": "船只从始发港离港",
@@ -34,11 +43,35 @@ _LABELS: dict[str, str] = {
     "lz:pod": "已到达卸货港",
     "lz:pickup": "已提柜",
     "lz:fc": "货物已送达 FC 场地",
+    "mt:wh_actual": "实际送仓",
+    "mt:wh_eta": "预计送仓",
+    "mt:customs": "抵达清关地",
+    "mt:rail": "预配班列",
+    "mt:outbound": "仓库监装出库",
 }
+
+# 无日期节点单独记一笔，补上日期后还能再推（不去覆盖 dated key）
+UNDATED_SUFFIX = ":undated"
+_OCCUR_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\b")
+
+
+def event_has_date(event: TrackEvent) -> bool:
+    return bool(_OCCUR_DATE.match((event.occur_date or "").strip()))
+
+
+def notify_event_key(mkey: str, dated: bool) -> str:
+    return mkey if dated else f"{mkey}{UNDATED_SUFFIX}"
+
+
+def base_milestone_key(key: str) -> str:
+    if key.endswith(UNDATED_SUFFIX):
+        return key[: -len(UNDATED_SUFFIX)]
+    return key
 
 
 def milestone_label(key: str) -> str:
-    return _LABELS.get(key, key)
+    base = base_milestone_key(key)
+    return _LABELS.get(base, base)
 
 
 def match_milestone(event: TrackEvent, kind: str) -> str | None:
@@ -56,6 +89,13 @@ def match_milestone(event: TrackEvent, kind: str) -> str | None:
     if kind == "longzhou":
         desc = _compact(event.description)
         for key, phrases in _LONGZHOU:
+            for phrase in phrases:
+                if _compact(phrase) in desc:
+                    return key
+        return None
+    if kind == "meitong":
+        desc = _compact(event.description)
+        for key, phrases in _MEITONG:
             for phrase in phrases:
                 if _compact(phrase) in desc:
                     return key

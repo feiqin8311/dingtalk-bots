@@ -27,7 +27,13 @@ from excel_export import (
     write_report_xlsx,
 )
 from gateway_client import LogisticsGatewayClient
-from milestones import filter_new_milestones, milestone_label
+from milestones import (
+    event_has_date,
+    filter_new_milestones,
+    milestone_label,
+    notify_event_key,
+)
+from meitong_client import MeitongClient
 from owners import KEPENGXIANG_USER_ID, notify_user_ids
 from pingyi_client import PingyiClient, TrackShipment
 from settings import TrackNotifyConfig
@@ -39,6 +45,8 @@ def _carrier_kind(carrier: str) -> str:
         return "longzhou"
     if "平谊" in text:
         return "pingyi"
+    if "美通" in text:
+        return "meitong"
     return "unknown"
 
 
@@ -123,11 +131,16 @@ def _emit_events(
     logistics = ",".join(row.logistics_nos) if is_pingyi else display_code
 
     matched = filter_new_milestones(shipment.events, kind=kind)
-    new_pairs = [
-        (mkey, event)
-        for mkey, event in matched
-        if not store.has_event(shipment_key, mkey)
-    ]
+    new_pairs: list[tuple[str, TrackEvent, str]] = []
+    for mkey, event in matched:
+        dated = event_has_date(event)
+        nkey = notify_event_key(mkey, dated)
+        if store.has_event(shipment_key, nkey):
+            continue
+        # 无日期：若 dated key 已在（含历史「一次记死」），不再刷无日期行
+        if not dated and store.has_event(shipment_key, mkey):
+            continue
+        new_pairs.append((mkey, event, nkey))
     skipped = len(matched) - len(new_pairs)
     if skipped:
         logger.debug(
@@ -148,7 +161,7 @@ def _emit_events(
 
     detail_parts: list[str] = []
     event_keys: list[str] = []
-    for mkey, event in new_pairs:
+    for mkey, event, nkey in new_pairs:
         when = (event.occur_date or "").strip()
         if " " in when:
             when = when.split(" ", 1)[0]
@@ -156,7 +169,7 @@ def _emit_events(
         part = f"{when} {status}".strip() if when else status
         if part:
             detail_parts.append(part)
-        event_keys.append(mkey)
+        event_keys.append(nkey)
 
     detail = "\n".join(detail_parts)
     message = f"{display_code} 节点{len(event_keys)}条"
@@ -195,6 +208,8 @@ def _missing_key_line(row: TableRow, *, kind: str) -> str:
     inv = (row.invoice_no or row.record_id or "").strip()
     if kind == "pingyi":
         return f"{inv} 无FBA编码，无法查询平谊轨迹".strip()
+    if kind == "meitong":
+        return f"{inv} 无物流编号，无法查询美通轨迹".strip()
     return f"{inv} 无物流编号，无法查询龙舟轨迹".strip()
 
 
@@ -625,6 +640,190 @@ def _retry_longzhou_query_errors(
     return stats
 
 
+def _process_meitong_row(
+    row: TableRow,
+    *,
+    client: MeitongClient,
+    store: TrackStateStore,
+    bucket: list[ReportItem],
+    logger: logging.Logger,
+) -> tuple[int, bool, list[str]]:
+    nos = row.logistics_nos
+    if not nos:
+        return _report_missing_key(
+            row, kind="meitong", store=store, bucket=bucket, logger=logger
+        )
+
+    ok_uids = notify_user_ids(row.owners, issue=False)
+    issue_uids = notify_user_ids(row.owners, issue=True)
+    fba_joined = ",".join(row.fba_codes)
+    notified = 0
+    query_ok = True
+    issues: list[str] = []
+    for order_no in nos:
+        try:
+            shipment = client.get_track(order_no)
+        except Exception as exc:
+            query_ok = False
+            line = _query_fail_line(row, order_no, str(exc))
+            issues.append(line)
+            logger.exception("meitong getTrackInfo failed order_no=%s: %s", order_no, exc)
+            notified += _collect_once(
+                shipment_key=order_no,
+                event_key="query_error",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=fba_joined,
+                logistics_no=order_no,
+                detail=line,
+                logger=logger,
+            )
+            continue
+        if shipment is None:
+            line = _no_track_line(row, order_no)
+            issues.append(line)
+            logger.warning("no track meitong order_no=%s record=%s", order_no, row.record_id)
+            notified += _collect_once(
+                shipment_key=order_no,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=fba_joined,
+                logistics_no=order_no,
+                detail=line,
+                logger=logger,
+            )
+            continue
+        dropped = _drop_transient_issues(bucket, order_no)
+        if dropped:
+            logger.info(
+                "drop stale meitong issues order_no=%s count=%s (query recovered)",
+                order_no,
+                dropped,
+            )
+        logger.info(
+            "track record=%s meitong=%s events=%s latest=%s",
+            row.record_id,
+            order_no,
+            len(shipment.events),
+            shipment.track_status_name,
+        )
+        notified += _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=order_no,
+            display_code=order_no,
+            kind="meitong",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return notified, query_ok, issues
+
+
+def _retry_meitong_query_errors(
+    bucket: list[ReportItem],
+    rows: list[TableRow],
+    *,
+    meitong: MeitongClient | None,
+    store: TrackStateStore,
+    logger: logging.Logger,
+    pause_sec: float = 1.0,
+) -> dict[str, int]:
+    stats = {"meitong_retry": 0, "meitong_recovered": 0}
+    if meitong is None or not bucket:
+        return stats
+
+    by_no: dict[str, TableRow] = {}
+    for row in rows:
+        if _carrier_kind(row.carrier) != "meitong":
+            continue
+        for no in row.logistics_nos:
+            key = (no or "").strip()
+            if key:
+                by_no[key] = row
+
+    targets: list[tuple[TableRow, str]] = []
+    seen: set[str] = set()
+    for it in bucket:
+        if it.event_key != "query_error":
+            continue
+        no = (it.logistics_no or it.shipment_key or "").strip()
+        if not no or no not in by_no or no in seen:
+            continue
+        seen.add(no)
+        targets.append((by_no[no], no))
+
+    if not targets:
+        return stats
+
+    logger.info("meitong retry pass count=%s pause=%ss (serial)", len(targets), pause_sec)
+    stats["meitong_retry"] = len(targets)
+
+    for i, (row, order_no) in enumerate(targets):
+        if i > 0 and pause_sec > 0:
+            time.sleep(pause_sec)
+        ok_uids = notify_user_ids(row.owners, issue=False)
+        issue_uids = notify_user_ids(row.owners, issue=True)
+        fba_joined = ",".join(row.fba_codes)
+        try:
+            shipment = meitong.get_track(order_no)
+        except Exception as exc:
+            logger.warning("meitong retry still failed order_no=%s: %s", order_no, exc)
+            continue
+
+        bucket[:] = [
+            it
+            for it in bucket
+            if not (it.event_key == "query_error" and it.shipment_key == order_no)
+        ]
+        stats["meitong_recovered"] += 1
+
+        if shipment is None:
+            line = _no_track_line(row, order_no)
+            logger.info("meitong retry no track order_no=%s record=%s", order_no, row.record_id)
+            _collect_once(
+                shipment_key=order_no,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=fba_joined,
+                logistics_no=order_no,
+                detail=line,
+                logger=logger,
+            )
+            continue
+
+        logger.info(
+            "meitong retry ok order_no=%s events=%s latest=%s",
+            order_no,
+            len(shipment.events),
+            shipment.track_status_name,
+        )
+        _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=order_no,
+            display_code=order_no,
+            kind="meitong",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return stats
+
+
 def _retry_pingyi_query_errors(
     bucket: list[ReportItem],
     rows: list[TableRow],
@@ -734,6 +933,7 @@ def _process_row(
     *,
     pingyi: PingyiClient | None,
     gateway: LogisticsGatewayClient | None,
+    meitong: MeitongClient | None,
     store: TrackStateStore,
     bucket: list[ReportItem],
     logger: logging.Logger,
@@ -754,6 +954,16 @@ def _process_row(
     if kind == "longzhou":
         return _process_longzhou_row(
             row, client=gateway, store=store, bucket=bucket, logger=logger
+        )
+    if kind == "meitong":
+        if meitong is None:
+            line = _query_fail_line(
+                row, ",".join(row.logistics_nos) or row.invoice_no, "美通客户端未配置"
+            )
+            logger.error("skip meitong record=%s: meitong client missing", row.record_id)
+            return 0, False, [line]
+        return _process_meitong_row(
+            row, client=meitong, store=store, bucket=bucket, logger=logger
         )
     logger.warning(
         "skip unknown carrier=%s record=%s invoice=%s",
@@ -812,7 +1022,7 @@ def _deliver_excel_reports(
             _mark_and_clear_items(store, no_owner)
 
     # 先写盘，再发钉钉：发送侧 import 失败时也要有 Excel 可查
-    # 物流人员：无日期节点不入其 Excel；柯鹏翔保留完整物流详情
+    # 有日期则所有人只留日期行；全无日期不入物流人员 Excel，柯鹏翔仍收
     prepared: list[tuple[str, Path, list[ReportItem]]] = []
     # 实际写入某人 Excel 的行 → mark 时只要求这些收件人发送成功
     delivered_recipients: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -956,6 +1166,15 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             max_concurrent=config.gateway_max_concurrent,
             min_interval_sec=config.gateway_min_interval_sec,
         )
+    meitong: MeitongClient | None = None
+    if config.meitong_username and config.meitong_password:
+        meitong = MeitongClient(
+            config.meitong_username,
+            config.meitong_password,
+            base_url=config.meitong_base_url,
+            timeout_sec=config.meitong_timeout_sec,
+            retries=config.meitong_retries,
+        )
     store = TrackStateStore(config.state_db_path)
     bucket: list[ReportItem] = []
     stats: dict[str, int] = {
@@ -968,6 +1187,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
         "gateway_recovered": 0,
         "pingyi_retry": 0,
         "pingyi_recovered": 0,
+        "meitong_retry": 0,
+        "meitong_recovered": 0,
         "pending_resumed": 0,
         "excel_rows": 0,
         "excel_files": 0,
@@ -1039,6 +1260,7 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                 row,
                 pingyi=pingyi,
                 gateway=gateway,
+                meitong=meitong,
                 store=store,
                 bucket=local,
                 logger=logger,
@@ -1053,7 +1275,7 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                 kind = _carrier_kind(row.carrier)
                 if kind == "pingyi" and not row.fba_codes:
                     stats["missing_key"] += 1
-                elif kind == "longzhou" and not row.logistics_nos:
+                elif kind in {"longzhou", "meitong"} and not row.logistics_nos:
                     stats["missing_key"] += 1
                 stats["processed"] += 1
                 stats["collected"] += collected
@@ -1095,8 +1317,21 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             pause_sec=1.0,
         )
         stats.update(py_retry)
+        mt_retry = _retry_meitong_query_errors(
+            bucket,
+            pending,
+            meitong=meitong,
+            store=store,
+            logger=logger,
+            pause_sec=1.0,
+        )
+        stats.update(mt_retry)
         # 重试后问题行可能变少，issue 摘要以 bucket 为准
-        if retry_stats.get("gateway_recovered") or py_retry.get("pingyi_recovered"):
+        if (
+            retry_stats.get("gateway_recovered")
+            or py_retry.get("pingyi_recovered")
+            or mt_retry.get("meitong_recovered")
+        ):
             issue_lines = [
                 it.detail or it.message
                 for it in bucket
