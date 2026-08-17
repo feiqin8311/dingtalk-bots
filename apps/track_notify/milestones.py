@@ -25,14 +25,42 @@ _LONGZHOU: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("lz:fc", ("货物已送达fc场地", "货物已送达FC场地")),
 )
 
-# 美通：前缀匹配，后面的国家/仓库/时间不固定。先匹配「实际送仓」以免落到「预计送仓」。
-_MEITONG: tuple[tuple[str, tuple[str, ...]], ...] = (
+# 堡森：短语须全部命中。预计离港/到港与已离港/已到达拆开；港名/航次/FBA 不写死。
+_BAOSEN: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("bs:eta_sail", ("预计", "离港")),
+    ("bs:sail", ("已离港",)),
+    ("bs:eta_pod", ("预计", "到港")),
+    ("bs:pod", ("已到达",)),
+    ("bs:truck_out", ("卡车", "发出")),
+    ("bs:truck_ok", ("卡车", "派送成功")),
+)
+
+# 美通按钉钉「出运渠道」分套。短语须全部命中（前缀匹配，国家/承运商/时间不写死）。
+# 海运先匹配「预配船期」，避免文案里的「预计到港」落到真到港。
+_MEITONG_TRUCK: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mt:wh_actual", ("您的订单实际送仓时间",)),
     ("mt:wh_eta", ("您的订单预计送仓时间",)),
     ("mt:customs", ("您的订单已抵达清关地",)),
     ("mt:rail", ("预配班列",)),
     ("mt:outbound", ("仓库监装出库",)),
 )
+_MEITONG_SEA: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("mt:sea_sail", ("预配船期",)),
+    ("mt:outbound", ("仓库监装出库",)),
+    ("mt:sea_depart", ("已于", "离港")),
+    ("mt:sea_pod", ("已于", "到港")),
+    ("mt:sea_deliver", ("交付",)),
+)
+
+
+def meitong_lane(channel: str) -> str | None:
+    """卡航 / 海运（含海派）。其它渠道不套美通节点。"""
+    text = channel or ""
+    if "卡航" in text:
+        return "truck"
+    if "海运" in text or "海派" in text:
+        return "sea"
+    return None
 
 # Excel/通知展示用固定中文节点名（不暴露 API 中英混写原文）
 _LABELS: dict[str, str] = {
@@ -43,11 +71,21 @@ _LABELS: dict[str, str] = {
     "lz:pod": "已到达卸货港",
     "lz:pickup": "已提柜",
     "lz:fc": "货物已送达 FC 场地",
+    "bs:eta_sail": "预计离港",
+    "bs:sail": "已离港",
+    "bs:eta_pod": "预计到港",
+    "bs:pod": "已到达",
+    "bs:truck_out": "卡车发出",
+    "bs:truck_ok": "派送成功",
     "mt:wh_actual": "实际送仓",
     "mt:wh_eta": "预计送仓",
     "mt:customs": "抵达清关地",
     "mt:rail": "预配班列",
     "mt:outbound": "仓库监装出库",
+    "mt:sea_sail": "预配船期",
+    "mt:sea_depart": "离港",
+    "mt:sea_pod": "到港",
+    "mt:sea_deliver": "交付",
 }
 
 # 无日期节点单独记一笔，补上日期后还能再推（不去覆盖 dated key）
@@ -74,7 +112,12 @@ def milestone_label(key: str) -> str:
     return _LABELS.get(base, base)
 
 
-def match_milestone(event: TrackEvent, kind: str) -> str | None:
+def match_milestone(
+    event: TrackEvent,
+    kind: str,
+    *,
+    channel: str = "",
+) -> str | None:
     """命中指定业务节点则返回稳定 key（如 py:KC / lz:pod），否则 None。"""
     if kind == "pingyi":
         code = (event.track_code or "").strip().upper()
@@ -93,12 +136,21 @@ def match_milestone(event: TrackEvent, kind: str) -> str | None:
                 if _compact(phrase) in desc:
                     return key
         return None
-    if kind == "meitong":
+    if kind == "baosen":
         desc = _compact(event.description)
-        for key, phrases in _MEITONG:
-            for phrase in phrases:
-                if _compact(phrase) in desc:
-                    return key
+        for key, phrases in _BAOSEN:
+            if all(_compact(p) in desc for p in phrases):
+                return key
+        return None
+    if kind == "meitong":
+        lane = meitong_lane(channel)
+        table = _MEITONG_TRUCK if lane == "truck" else _MEITONG_SEA if lane == "sea" else ()
+        if not table:
+            return None
+        desc = _compact(event.description)
+        for key, phrases in table:
+            if all(_compact(p) in desc for p in phrases):
+                return key
         return None
     return None
 
@@ -108,6 +160,7 @@ def filter_new_milestones(
     *,
     kind: str,
     already: set[str] | None = None,
+    channel: str = "",
 ) -> list[tuple[str, TrackEvent]]:
     """
     从轨迹中筛出尚未通知的指定节点；同一 milestone key 只取第一条。
@@ -117,7 +170,7 @@ def filter_new_milestones(
     seen: set[str] = set()
     out: list[tuple[str, TrackEvent]] = []
     for event in events:
-        key = match_milestone(event, kind)
+        key = match_milestone(event, kind, channel=channel)
         if not key or key in seen or key in known:
             continue
         seen.add(key)

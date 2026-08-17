@@ -90,6 +90,38 @@ class GatewayClientTests(unittest.TestCase):
         self.assertIn("AL0-UC54XYYFYNEW2", line)
         self.assertIn("在CFS收到货物", line)
 
+    def test_query_fba_sends_fba_code_not_logistics_no(self):
+        client = LogisticsGatewayClient("http://example.test", "token")
+        captured: dict = {}
+
+        def fake_urlopen(req, timeout=0):
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse(SAMPLE_AGL)
+
+        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            shipment = client.query_fba("FBA15LZG9QTX", platform="baosen")
+
+        self.assertIsNotNone(shipment)
+        self.assertEqual(captured["body"]["fba_code"], "FBA15LZG9QTX")
+        self.assertEqual(captured["body"]["platform"], "baosen")
+        self.assertTrue(captured["body"]["include_tracking"])
+        self.assertTrue(captured["body"]["include_order"])
+        self.assertNotIn("logistics_no", captured["body"])
+        self.assertEqual(len(shipment.events), 3)
+
+    def test_query_fba_missing_logistics_no_is_error(self):
+        client = LogisticsGatewayClient("http://example.test", "token")
+
+        def fake_urlopen(req, timeout=0):
+            return FakeResponse(
+                {"success": False, "data": None, "error": "缺少物流编号"}
+            )
+
+        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(RuntimeError) as ctx:
+                client.query_fba("FBA15LZG9QTX", platform="baosen")
+        self.assertIn("缺少物流编号", str(ctx.exception))
+
     def test_query_longzhou_serializes_when_max_concurrent_1(self):
         """默认闸门：同时只有 1 路在飞，避免并行打 AGL。"""
         client = LogisticsGatewayClient(

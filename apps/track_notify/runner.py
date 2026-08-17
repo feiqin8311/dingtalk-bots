@@ -43,6 +43,8 @@ def _carrier_kind(carrier: str) -> str:
     text = carrier or ""
     if "龙舟" in text:
         return "longzhou"
+    if "堡森" in text:
+        return "baosen"
     if "平谊" in text:
         return "pingyi"
     if "美通" in text:
@@ -130,7 +132,9 @@ def _emit_events(
     fba = display_code if is_pingyi else ",".join(row.fba_codes)
     logistics = ",".join(row.logistics_nos) if is_pingyi else display_code
 
-    matched = filter_new_milestones(shipment.events, kind=kind)
+    matched = filter_new_milestones(
+        shipment.events, kind=kind, channel=row.channel
+    )
     new_pairs: list[tuple[str, TrackEvent, str]] = []
     for mkey, event in matched:
         dated = event_has_date(event)
@@ -208,6 +212,8 @@ def _missing_key_line(row: TableRow, *, kind: str) -> str:
     inv = (row.invoice_no or row.record_id or "").strip()
     if kind == "pingyi":
         return f"{inv} 无FBA编码，无法查询平谊轨迹".strip()
+    if kind == "baosen":
+        return f"{inv} 无FBA编码，无法查询堡森轨迹".strip()
     if kind == "meitong":
         return f"{inv} 无物流编号，无法查询美通轨迹".strip()
     return f"{inv} 无物流编号，无法查询龙舟轨迹".strip()
@@ -280,7 +286,7 @@ def _report_missing_key(
     line = _missing_key_line(row, kind=kind)
     # 问题数据只推柯鹏翔
     user_ids = notify_user_ids(row.owners, issue=True)
-    event_key = "missing_fba" if kind == "pingyi" else "missing_logistics_no"
+    event_key = "missing_fba" if kind in {"pingyi", "baosen"} else "missing_logistics_no"
     logger.warning(
         "missing key kind=%s record=%s invoice=%s owners=%s => %s",
         kind,
@@ -640,6 +646,214 @@ def _retry_longzhou_query_errors(
     return stats
 
 
+def _process_baosen_row(
+    row: TableRow,
+    *,
+    client: LogisticsGatewayClient | None,
+    store: TrackStateStore,
+    bucket: list[ReportItem],
+    logger: logging.Logger,
+) -> tuple[int, bool, list[str]]:
+    if client is None:
+        line = _query_fail_line(
+            row, ",".join(row.fba_codes) or row.invoice_no, "网关未配置"
+        )
+        logger.error(
+            "skip baosen record=%s: gateway not configured (LOGISTICS_GATEWAY_*)",
+            row.record_id,
+        )
+        n = _collect_once(
+            shipment_key=row.record_id,
+            event_key="gateway_missing",
+            message=line,
+            user_ids=notify_user_ids(row.owners, issue=True),
+            store=store,
+            bucket=bucket,
+            row=row,
+            fba_code=",".join(row.fba_codes),
+            logistics_no=",".join(row.logistics_nos),
+            detail=line,
+            logger=logger,
+        )
+        return n, False, [line]
+
+    codes = row.fba_codes
+    if not codes:
+        return _report_missing_key(
+            row, kind="baosen", store=store, bucket=bucket, logger=logger
+        )
+
+    ok_uids = notify_user_ids(row.owners, issue=False)
+    issue_uids = notify_user_ids(row.owners, issue=True)
+    logistics_joined = ",".join(row.logistics_nos)
+    notified = 0
+    query_ok = True
+    issues: list[str] = []
+    for code in codes:
+        try:
+            shipment = client.query_fba(code, platform="baosen")
+        except Exception as exc:
+            query_ok = False
+            line = _query_fail_line(row, code, str(exc))
+            issues.append(line)
+            logger.exception("gateway baosen failed fba=%s: %s", code, exc)
+            notified += _collect_once(
+                shipment_key=code,
+                event_key="query_error",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=code,
+                logistics_no=logistics_joined,
+                detail=line,
+                logger=logger,
+            )
+            continue
+        if shipment is None:
+            line = _no_track_line(row, code)
+            issues.append(line)
+            logger.warning("no track fba=%s record=%s", code, row.record_id)
+            notified += _collect_once(
+                shipment_key=code,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=code,
+                logistics_no=logistics_joined,
+                detail=line,
+                logger=logger,
+            )
+            continue
+        dropped = _drop_transient_issues(bucket, code)
+        if dropped:
+            logger.info(
+                "drop stale baosen issues fba=%s count=%s (query recovered)",
+                code,
+                dropped,
+            )
+        logger.info(
+            "track record=%s fba=%s events=%s latest=%s",
+            row.record_id,
+            code,
+            len(shipment.events),
+            shipment.track_status_name,
+        )
+        notified += _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=code,
+            display_code=code,
+            kind="baosen",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return notified, query_ok, issues
+
+
+def _retry_baosen_query_errors(
+    bucket: list[ReportItem],
+    rows: list[TableRow],
+    *,
+    gateway: LogisticsGatewayClient | None,
+    store: TrackStateStore,
+    logger: logging.Logger,
+    pause_sec: float = 3.0,
+) -> dict[str, int]:
+    """堡森 FBA 网关瞬时失败：全量结束后再串行重查 1 轮。"""
+    stats = {"baosen_retry": 0, "baosen_recovered": 0}
+    if gateway is None or not bucket:
+        return stats
+
+    by_fba: dict[str, TableRow] = {}
+    for row in rows:
+        if _carrier_kind(row.carrier) != "baosen":
+            continue
+        for code in row.fba_codes:
+            key = (code or "").strip()
+            if key:
+                by_fba[key] = row
+
+    targets: list[tuple[TableRow, str]] = []
+    seen: set[str] = set()
+    for it in bucket:
+        if it.event_key != "query_error":
+            continue
+        code = (it.fba_code or it.shipment_key or "").strip()
+        if not code or code not in by_fba or code in seen:
+            continue
+        seen.add(code)
+        targets.append((by_fba[code], code))
+
+    if not targets:
+        return stats
+
+    logger.info("baosen retry pass count=%s pause=%ss (serial)", len(targets), pause_sec)
+    stats["baosen_retry"] = len(targets)
+
+    for i, (row, code) in enumerate(targets):
+        if i > 0 and pause_sec > 0:
+            time.sleep(pause_sec)
+        ok_uids = notify_user_ids(row.owners, issue=False)
+        issue_uids = notify_user_ids(row.owners, issue=True)
+        logistics_joined = ",".join(row.logistics_nos)
+        try:
+            shipment = gateway.query_fba(code, platform="baosen")
+        except Exception as exc:
+            logger.warning("baosen retry still failed fba=%s: %s", code, exc)
+            continue
+
+        bucket[:] = [
+            it
+            for it in bucket
+            if not (it.event_key == "query_error" and it.shipment_key == code)
+        ]
+        stats["baosen_recovered"] += 1
+
+        if shipment is None:
+            line = _no_track_line(row, code)
+            logger.info("baosen retry no track fba=%s record=%s", code, row.record_id)
+            _collect_once(
+                shipment_key=code,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=code,
+                logistics_no=logistics_joined,
+                detail=line,
+                logger=logger,
+            )
+            continue
+
+        logger.info(
+            "baosen retry ok fba=%s events=%s latest=%s",
+            code,
+            len(shipment.events),
+            shipment.track_status_name,
+        )
+        _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=code,
+            display_code=code,
+            kind="baosen",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return stats
+
+
 def _process_meitong_row(
     row: TableRow,
     *,
@@ -953,6 +1167,10 @@ def _process_row(
         )
     if kind == "longzhou":
         return _process_longzhou_row(
+            row, client=gateway, store=store, bucket=bucket, logger=logger
+        )
+    if kind == "baosen":
+        return _process_baosen_row(
             row, client=gateway, store=store, bucket=bucket, logger=logger
         )
     if kind == "meitong":
@@ -1273,7 +1491,7 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             for fut in as_completed(futures):
                 row, collected, query_ok, issues, local = fut.result()
                 kind = _carrier_kind(row.carrier)
-                if kind == "pingyi" and not row.fba_codes:
+                if kind in {"pingyi", "baosen"} and not row.fba_codes:
                     stats["missing_key"] += 1
                 elif kind in {"longzhou", "meitong"} and not row.logistics_nos:
                     stats["missing_key"] += 1
@@ -1308,6 +1526,15 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             pause_sec=3.0,
         )
         stats.update(retry_stats)
+        baosen_retry = _retry_baosen_query_errors(
+            bucket,
+            pending,
+            gateway=gateway,
+            store=store,
+            logger=logger,
+            pause_sec=3.0,
+        )
+        stats.update(baosen_retry)
         py_retry = _retry_pingyi_query_errors(
             bucket,
             pending,

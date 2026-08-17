@@ -74,10 +74,10 @@ def _parse_carrier_keywords() -> tuple[str, ...]:
     raw = (
         os.getenv("TRACK_CARRIER_KEYWORDS")
         or os.getenv("TRACK_CARRIER_KEYWORD")
-        or "平谊,龙舟,美通"
+        or "平谊,龙舟,美通,堡森"
     ).strip()
     parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
-    return tuple(parts) if parts else ("平谊", "龙舟", "美通")
+    return tuple(parts) if parts else ("平谊", "龙舟", "美通", "堡森")
 
 
 def load_config_from_env() -> TrackNotifyConfig:

@@ -80,7 +80,29 @@ class LogisticsGatewayClient:
         brand = (brand or "").strip()
         if brand:
             payload["brand"] = brand
+        return self._query_fba(payload, fallback_no=logistics_no)
 
+    def query_fba(
+        self,
+        fba_code: str,
+        *,
+        platform: str = "baosen",
+    ) -> TrackShipment | None:
+        """FBA → 网关对钉钉表取物流编号 → platform=baosen。不传物流编号。"""
+        fba_code = (fba_code or "").strip()
+        if not fba_code:
+            raise ValueError("fba_code required")
+        payload: dict[str, Any] = {
+            "fba_code": fba_code,
+            "platform": (platform or "baosen").strip() or "baosen",
+            "include_order": True,
+            "include_tracking": True,
+        }
+        return self._query_fba(payload, fallback_no=fba_code)
+
+    def _query_fba(
+        self, payload: dict[str, Any], *, fallback_no: str
+    ) -> TrackShipment | None:
         with self._sem:
             if self._min_interval > 0:
                 with self._pace_lock:
@@ -140,15 +162,17 @@ class LogisticsGatewayClient:
 
         # 轨迹列表可能是新→旧；通知前按时间字符串排序（空日期垫后）
         events.sort(key=lambda e: e.occur_date or "9999")
-        query_val = str(track_block.get("查询值") or logistics_no).strip()
+        query_val = str(track_block.get("查询值") or fallback_no).strip()
+        latest = track_block.get("最新轨迹")
+        latest_text = (
+            str(latest.get("内容") or "").strip() if isinstance(latest, dict) else ""
+        )
         return TrackShipment(
             reference_no=query_val,
             tracking_no=query_val,
             destination_country="",
             track_status="",
-            track_status_name=str((track_block.get("最新轨迹") or {}).get("内容") or "").strip()
-            if isinstance(track_block.get("最新轨迹"), dict)
-            else "",
+            track_status_name=latest_text,
             events=events,
         )
 

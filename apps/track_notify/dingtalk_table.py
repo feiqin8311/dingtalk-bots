@@ -237,7 +237,7 @@ class DingTalkNotableClient:
         """
         today = today or datetime.now(tz=CST).date()
         if carrier_keywords is None:
-            keywords = (carrier_keyword,) if carrier_keyword else ("平谊", "龙舟", "美通")
+            keywords = (carrier_keyword,) if carrier_keyword else ("平谊", "龙舟", "美通", "堡森")
         else:
             keywords = tuple(k for k in carrier_keywords if k)
             if not keywords and carrier_keyword:

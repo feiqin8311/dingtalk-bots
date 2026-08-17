@@ -17,6 +17,7 @@ from milestones import (  # noqa: E402
     event_has_date,
     filter_new_milestones,
     match_milestone,
+    meitong_lane,
     milestone_label,
     notify_event_key,
 )
@@ -75,46 +76,115 @@ class MatchMilestoneTests(unittest.TestCase):
         )
         self.assertIsNone(match_milestone(_ev("海关查验中"), "longzhou"))
 
-    def test_meitong_requested_nodes(self):
+    def test_baosen_requested_nodes(self):
+        def _bs(desc: str):
+            return match_milestone(_ev(desc), "baosen")
+
         self.assertEqual(
-            match_milestone(
-                _ev("您的订单实际送仓时间为：2026-08-14 23:59:59"), "meitong"
+            _bs("HZUK26060037预计 2026-06-20 11:11:11离港"),
+            "bs:eta_sail",
+        )
+        self.assertEqual(
+            _bs(
+                "HZUK26060037在 2026-06-20 11:11:11已离港 NINGBO CHINA，"
+                "航次信息：EVER AEON 1405-008W."
             ),
+            "bs:sail",
+        )
+        self.assertEqual(
+            _bs("HZUK26060037预计 2026-08-06 08:00:00到港"),
+            "bs:eta_pod",
+        )
+        self.assertEqual(
+            _bs(
+                "HZUK26060037在 2026-08-07 11:39:44已到达FELIXSTOWE UNITED KINGDOM，"
+                "航次信息：EVER AEON 1405-008W."
+            ),
+            "bs:pod",
+        )
+        self.assertEqual(
+            _bs(
+                "【卡车】HZUK26060037 <FBA15LQJRJT> 在 2026-08-14 11:19 发出"
+                "在 2026-08-13 00:00 预计到达，数量：51。ISA: 435730007970"
+            ),
+            "bs:truck_out",
+        )
+        self.assertEqual(
+            _bs(
+                "【卡车】HZUK26060037 <FBA15LQJRJT>在 2026-08-13 00:00 派送成功，"
+                "数量：51. Appointment ID: 435730007970."
+            ),
+            "bs:truck_ok",
+        )
+        self.assertIsNone(_bs("HZUK26060037 在 2026-08-27 11:30:00 预约提拆柜。"))
+        self.assertEqual(milestone_label("bs:eta_sail"), "预计离港")
+        self.assertEqual(milestone_label("bs:pod:undated"), "已到达")
+        self.assertEqual(milestone_label("bs:truck_ok"), "派送成功")
+
+    def test_meitong_requested_nodes(self):
+        self.assertEqual(meitong_lane("卡航"), "truck")
+        self.assertEqual(meitong_lane("海运"), "sea")
+        self.assertEqual(meitong_lane("海派"), "sea")
+        self.assertIsNone(meitong_lane("空运"))
+
+        def _mt(desc: str, channel: str = "卡航"):
+            return match_milestone(_ev(desc), "meitong", channel=channel)
+
+        self.assertEqual(
+            _mt("您的订单实际送仓时间为：2026-08-14 23:59:59"),
             "mt:wh_actual",
         )
         self.assertEqual(
-            match_milestone(
-                _ev("您的订单预计送仓时间为：2026-08-14 23:59:56"), "meitong"
-            ),
+            _mt("您的订单预计送仓时间为：2026-08-14 23:59:56"),
             "mt:wh_eta",
         )
+        self.assertEqual(_mt("您的订单已抵达清关地-比利时"), "mt:customs")
+        self.assertEqual(_mt("您的订单已抵达清关地-德国"), "mt:customs")
+        self.assertEqual(_mt("您的订单已抵达清关地"), "mt:customs")
         self.assertEqual(
-            match_milestone(_ev("您的订单已抵达清关地-比利时"), "meitong"),
-            "mt:customs",
-        )
-        self.assertEqual(
-            match_milestone(_ev("您的订单已抵达清关地-德国"), "meitong"),
-            "mt:customs",
-        )
-        self.assertEqual(
-            match_milestone(_ev("您的订单已抵达清关地"), "meitong"),
-            "mt:customs",
-        )
-        self.assertEqual(
-            match_milestone(
-                _ev("预配班列：预计2026-07-29发车，预计2026-08-18到达"), "meitong"
-            ),
+            _mt("预配班列：预计2026-07-29发车，预计2026-08-18到达"),
             "mt:rail",
         )
+        self.assertEqual(_mt("您的订单已于【宁波仓】仓库监装出库"), "mt:outbound")
+        self.assertIsNone(_mt("预配船期：预计2026-07-22开船"))
+        self.assertIsNone(_mt("预约送仓时间：2026-04-28 09:57:58。"))
+        self.assertIsNone(_mt("您的订单已于2026-07-26 09:38:47离港。"))
+        self.assertIsNone(
+            _mt("预配班列：预计2026-07-29发车，预计2026-08-18到达", channel="海派")
+        )
+        self.assertIsNone(_mt("您的订单已抵达清关地-比利时", channel="空运"))
+
         self.assertEqual(
-            match_milestone(_ev("您的订单已于【宁波仓】仓库监装出库"), "meitong"),
+            _mt("您的订单已于【宁波仓】仓库监装出库", channel="海运"),
             "mt:outbound",
         )
-        self.assertIsNone(match_milestone(_ev("预配船期：预计2026-07-22开船"), "meitong"))
-        self.assertIsNone(match_milestone(_ev("预约送仓时间：2026-04-28 09:57:58。"), "meitong"))
-        self.assertIsNone(match_milestone(_ev("您的订单已于2026-07-26 09:38:47离港。"), "meitong"))
+        self.assertEqual(
+            _mt("预配船期：预计2026-07-03升船，预计2026-07-10到港", channel="海派"),
+            "mt:sea_sail",
+        )
+        self.assertEqual(
+            _mt("您的订单已于2026-07-0613:27:47离港。", channel="海运"),
+            "mt:sea_depart",
+        )
+        self.assertEqual(
+            _mt("您的订单已于2026-08-10 23:00:00到港", channel="海运"),
+            "mt:sea_pod",
+        )
+        self.assertEqual(
+            _mt(
+                "您的订单已于当地时间2026-08-14 23:00:00交付UPs/DHL/FEDEX/DPD。",
+                channel="海运",
+            ),
+            "mt:sea_deliver",
+        )
+        self.assertEqual(
+            _mt("您的订单已于当地时间2026-08-14 23:00:00交付DPD。", channel="海派"),
+            "mt:sea_deliver",
+        )
+        self.assertIsNone(_mt("您的订单已抵达清关地-比利时", channel="海运"))
         self.assertEqual(milestone_label("mt:wh_actual"), "实际送仓")
         self.assertEqual(milestone_label("mt:customs:undated"), "抵达清关地")
+        self.assertEqual(milestone_label("mt:sea_deliver"), "交付")
 
     def test_longzhou_bilingual_api_text_still_matches(self):
         # 龙舟 API 常带英文后缀，匹配仍按关键字
