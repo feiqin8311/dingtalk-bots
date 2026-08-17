@@ -169,7 +169,12 @@ def _emit_events(
         when = (event.occur_date or "").strip()
         if " " in when:
             when = when.split(" ", 1)[0]
-        status = milestone_label(mkey)
+        # 美通写接口原文；其它货代仍用固定短标签
+        status = (
+            (event.description or "").strip() or milestone_label(mkey)
+            if kind == "meitong"
+            else milestone_label(mkey)
+        )
         part = f"{when} {status}".strip() if when else status
         if part:
             detail_parts.append(part)

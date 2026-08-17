@@ -533,6 +533,52 @@ class EmitIncrementalTests(unittest.TestCase):
             )
             store.close()
 
+    def test_meitong_keeps_original_description(self):
+        logger = logging.getLogger("test_emit")
+        row = TableRow(
+            record_id="r-mt",
+            invoice_no="26MT",
+            brand="Y",
+            country="美国",
+            carrier="美通",
+            fba_codes=["FBA15MT"],
+            logistics_nos=["SHGB2607012839"],
+            eta_date=None,
+            delivered_at=None,
+            channel="海运",
+        )
+        original = "您的订单已于2026-07-26 09:38:47离港。"
+        shipment = TrackShipment(
+            reference_no="SHGB2607012839",
+            tracking_no="SHGB2607012839",
+            destination_country="",
+            track_status="",
+            track_status_name="",
+            events=[
+                _ev("已下单", when="2026-07-08 18:48:54"),
+                _ev(original, when="2026-07-26 09:38:47"),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TrackStateStore(Path(tmp) / "s.sqlite3")
+            bucket: list = []
+            n = _emit_events(
+                row=row,
+                shipment=shipment,
+                shipment_key="SHGB2607012839",
+                display_code="SHGB2607012839",
+                kind="meitong",
+                user_ids=["u1"],
+                store=store,
+                bucket=bucket,
+                logger=logger,
+            )
+            self.assertEqual(n, 1)
+            self.assertEqual(bucket[0].event_keys, ["mt:sea_depart"])
+            self.assertEqual(bucket[0].detail, f"2026-07-26 {original}")
+            self.assertNotEqual(bucket[0].detail, "2026-07-26 离港")
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
