@@ -169,10 +169,10 @@ def _emit_events(
         when = (event.occur_date or "").strip()
         if " " in when:
             when = when.split(" ", 1)[0]
-        # 美通写接口原文；其它货代仍用固定短标签
+        # 美通/堡森写接口原文；平谊/龙舟仍用固定短标签
         status = (
             (event.description or "").strip() or milestone_label(mkey)
-            if kind == "meitong"
+            if kind in {"meitong", "baosen"}
             else milestone_label(mkey)
         )
         part = f"{when} {status}".strip() if when else status

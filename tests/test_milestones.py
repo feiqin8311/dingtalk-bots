@@ -579,6 +579,48 @@ class EmitIncrementalTests(unittest.TestCase):
             self.assertNotEqual(bucket[0].detail, "2026-07-26 离港")
             store.close()
 
+    def test_baosen_keeps_original_description(self):
+        logger = logging.getLogger("test_emit")
+        row = TableRow(
+            record_id="r-bs",
+            invoice_no="26YP060",
+            brand="YPLUS",
+            country="英国",
+            carrier="堡森",
+            fba_codes=["FBA15LV5LP3T"],
+            logistics_nos=["FBA15LV5LP3T"],
+            eta_date=None,
+            delivered_at=None,
+        )
+        original = "HZUK26060052预计 2026-07-26 11:11:11到港"
+        shipment = TrackShipment(
+            reference_no="HZUK26060052",
+            tracking_no="HZUK26060052",
+            destination_country="",
+            track_status="",
+            track_status_name="",
+            events=[_ev(original, when="2026-06-10")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TrackStateStore(Path(tmp) / "s.sqlite3")
+            bucket: list = []
+            n = _emit_events(
+                row=row,
+                shipment=shipment,
+                shipment_key="FBA15LV5LP3T",
+                display_code="FBA15LV5LP3T",
+                kind="baosen",
+                user_ids=["u1"],
+                store=store,
+                bucket=bucket,
+                logger=logger,
+            )
+            self.assertEqual(n, 1)
+            self.assertEqual(bucket[0].event_keys, ["bs:eta_pod"])
+            self.assertEqual(bucket[0].detail, f"2026-06-10 {original}")
+            self.assertNotEqual(bucket[0].detail, "2026-06-10 预计到港")
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
