@@ -16,7 +16,7 @@ from excel_export import (  # noqa: E402
     ReportItem,
     detail_line_has_date,
     export_filename,
-    filter_report_item_for_user,
+    filter_report_item,
     format_shipped_at,
     write_report_xlsx,
 )
@@ -170,18 +170,11 @@ class ExcelExportTests(unittest.TestCase):
             event_keys=["lz:ningbo", "lz:pod", "lz:pickup", "lz:fc"],
         )
         only_dated = "2026-08-13 出发地 中国宁波"
-        logistics = filter_report_item_for_user(
-            item, "17409662804279906", full_detail_user_id=KEPENGXIANG_USER_ID
-        )
-        assert logistics is not None
-        self.assertEqual(logistics.detail, only_dated)
-        kpx = filter_report_item_for_user(
-            item, KEPENGXIANG_USER_ID, full_detail_user_id=KEPENGXIANG_USER_ID
-        )
-        assert kpx is not None
-        self.assertEqual(kpx.detail, only_dated)
+        view = filter_report_item(item)
+        assert view is not None
+        self.assertEqual(view.detail, only_dated)
 
-    def test_filter_all_undated_omit_logistics(self):
+    def test_filter_all_undated_omit_everyone(self):
         item = ReportItem(
             shipment_key="AL0",
             event_key="lz:pod",
@@ -190,16 +183,17 @@ class ExcelExportTests(unittest.TestCase):
             detail="已到达卸货港\n已提柜",
             event_keys=["lz:pod", "lz:pickup"],
         )
-        self.assertIsNone(
-            filter_report_item_for_user(
-                item, "u1", full_detail_user_id=KEPENGXIANG_USER_ID
-            )
+        self.assertIsNone(filter_report_item(item))
+
+    def test_filter_issue_row_kept(self):
+        item = ReportItem(
+            shipment_key="r1",
+            event_key="no_track",
+            message="26EA193 AL0 未查到轨迹",
+            user_ids=[KEPENGXIANG_USER_ID],
+            detail="26EA193 AL0 未查到轨迹",
         )
-        kpx = filter_report_item_for_user(
-            item, KEPENGXIANG_USER_ID, full_detail_user_id=KEPENGXIANG_USER_ID
-        )
-        assert kpx is not None
-        self.assertEqual(kpx.detail, item.detail)
+        self.assertIs(filter_report_item(item), item)
 
 
 if __name__ == "__main__":

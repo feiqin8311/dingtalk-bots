@@ -75,16 +75,16 @@ def detail_line_has_date(line: str) -> bool:
     return bool(_DETAIL_DATE_PREFIX.match((line or "").strip()))
 
 
-def filter_report_item_for_user(
-    item: ReportItem,
-    user_id: str,
-    *,
-    full_detail_user_id: str,
-) -> ReportItem | None:
+_ISSUE_KEYS = frozenset(
+    {"query_error", "no_track", "gateway_missing", "missing_fba", "missing_logistics_no"}
+)
+
+
+def filter_report_item(item: ReportItem) -> ReportItem | None:
     """
-    物流详情只保留「有日期」的节点行（含总览接收人）。
-    全无日期：不推物流人员；柯鹏翔仍收（问题行 / 纯无日期节点）。
-    返回 None 表示该用户 Excel 不写此行。
+    物流详情只保留「有日期」的节点行。
+    全无日期：节点行丢弃；问题行保留（只推柯鹏翔，由 user_ids 决定）。
+    返回 None 表示 Excel 不写此行。
     """
     text = (item.detail or item.message or "").strip()
     if not text:
@@ -95,7 +95,9 @@ def filter_report_item_for_user(
         if len(dated) == len(lines):
             return item
         return replace(item, detail="\n".join(dated))
-    if (user_id or "").strip() == (full_detail_user_id or "").strip():
+    keys = set(item.event_keys or ())
+    keys.add(item.event_key)
+    if keys & _ISSUE_KEYS:
         return item
     return None
 

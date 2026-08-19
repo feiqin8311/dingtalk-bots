@@ -22,7 +22,7 @@ from dingtalk_table import DingTalkNotableClient, TableRow
 from excel_export import (
     ReportItem,
     export_filename,
-    filter_report_item_for_user,
+    filter_report_item,
     format_shipped_at,
     write_report_xlsx,
 )
@@ -34,7 +34,7 @@ from milestones import (
     notify_event_key,
 )
 from meitong_client import MeitongClient
-from owners import KEPENGXIANG_USER_ID, notify_user_ids
+from owners import notify_user_ids
 from pingyi_client import PingyiClient, TrackShipment
 from settings import TrackNotifyConfig
 
@@ -1245,7 +1245,7 @@ def _deliver_excel_reports(
             _mark_and_clear_items(store, no_owner)
 
     # 先写盘，再发钉钉：发送侧 import 失败时也要有 Excel 可查
-    # 有日期则所有人只留日期行；全无日期不入物流人员 Excel，柯鹏翔仍收
+    # 有日期则只留日期行；全无日期节点不入任何人 Excel（问题行仍给柯鹏翔）
     prepared: list[tuple[str, Path, list[ReportItem]]] = []
     # 实际写入某人 Excel 的行 → mark 时只要求这些收件人发送成功
     delivered_recipients: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -1257,12 +1257,10 @@ def _deliver_excel_reports(
             if k in seen:
                 continue
             seen.add(k)
-            view = filter_report_item_for_user(
-                it, user_id, full_detail_user_id=KEPENGXIANG_USER_ID
-            )
+            view = filter_report_item(it)
             if view is None:
                 logger.info(
-                    "omit undated-only detail for logistics user=%s shipment=%s",
+                    "omit undated-only detail user=%s shipment=%s",
                     user_id,
                     it.shipment_key,
                 )
@@ -1290,12 +1288,8 @@ def _deliver_excel_reports(
                 path,
                 len(unique),
             )
-        # mark 原始 item；物流侧滤掉的无日期节点仍随柯鹏翔落盘一并 mark
-        markable = [
-            it
-            for it in items
-            if it.user_ids and (it.shipment_key, it.event_key) in delivered_recipients
-        ]
+        # 落盘成功 + 全员被滤掉的无日期节点一并 mark，避免下周再冒出来
+        markable = [it for it in items if it.user_ids]
         if markable:
             _mark_and_clear_items(store, markable)
         return stats
