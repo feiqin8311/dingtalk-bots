@@ -105,6 +105,10 @@ STATE_FILE_PATH = os.getenv(
     os.path.join(BASE_DIR, "Workflow_State", "workflow_state.json"),
 )
 
+# WAIT_AMAZON 空闲超时：超时后不再占用运营，排队的不分仓单可以推送
+# ponytail: 3 天够跨周末；运营经常超过 3 天才回装箱表时把 LCL_OPS_TTL_SEC 调大
+OPS_TTL_SEC = int((os.getenv("LCL_OPS_TTL_SEC") or "259200").strip() or "259200")
+
 os.makedirs(EXCEL_FILES_DIR, exist_ok=True)
 os.makedirs(TEMPLATE_FILES_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(STATE_FILE_PATH) or ".", exist_ok=True)

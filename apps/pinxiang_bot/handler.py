@@ -543,7 +543,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 ops_id,
                 f"【不分仓拼箱】新任务已加入队列（第 {queue_pos} 位）。\n"
                 f"文件：{packing_name}\n"
-                "请先完成当前单，完成后系统会自动推送下一单。",
+                "请先完成当前单，完成后系统会自动推送下一单。\n"
+                "若当前分仓单已不用做，回复【取消】结束后会自动推送本单。",
             )
             self.logger.info(
                 "pinxiang queued for ops=%s(%s) pos=%s packing=%s from logistics=%s",

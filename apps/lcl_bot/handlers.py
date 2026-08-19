@@ -78,7 +78,14 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
     def has_active_ops(self, user_id: str) -> bool:
         if not user_id:
             return False
-        return bool((self.state_manager.state.get("ops_active") or {}).get(str(user_id)))
+        self.state_manager.expire_stale_ops_jobs()
+        if self.state_manager.find_ops_job(user_id):
+            return True
+        cached = getattr(self.dingtalk_api, "_openid_userid_cache", {}) or {}
+        for key in (self.state_manager.state.get("ops_active") or {}):
+            if cached.get(key) == str(user_id) or cached.get(str(user_id)) == str(key):
+                return True
+        return False
 
     def has_logistics_session(self, user_id: str) -> bool:
         if not user_id:
@@ -157,11 +164,17 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             
             self.logger.info(f"消息类型: {msg_type}, 用户角色: {user_role}, 当前状态: {self.state_manager.get_status()}")
             
+            if user_role == "operation":
+                self.state_manager.expire_stale_ops_jobs()
+                self.state_manager.touch_ops_job(sender_staff_id, sender_user_id, sender_id)
+
             # 根据消息类型和用户角色分发处理
             if msg_type == 'text':
                 await self._handle_text_message(incoming_message, user_role)
             elif msg_type == 'file':
-                await self._handle_file_message(incoming_message, user_role, sender_id, conversation_id)
+                await self._handle_file_message(
+                    incoming_message, user_role, sender_user_id or sender_id, conversation_id
+                )
             else:
                 self._send_text_reply(f"暂不支持的消息类型: {msg_type}", incoming_message)
             
@@ -265,6 +278,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self._send_status_message(incoming_message)
         elif text_content in ['重置', 'reset']:
             self._handle_reset_command(incoming_message, user_role)
+        elif text_content in ['取消', 'cancel', '取消拼箱']:
+            self._handle_ops_cancel(incoming_message, user_role)
         elif text_content in ['确认', 'confirm', '确定']:
             await self._handle_confirmation(incoming_message, user_role)
         elif user_role == 'logistics' and self.state_manager.is_waiting_for_ops_select():
@@ -828,7 +843,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                     corp_user_id,
                     f"【分仓拼箱】新任务已加入队列（第 {pos} 位）。\n"
                     f"文件：{packing_name}\n"
-                    "请先完成当前单，完成后系统会自动推送下一单。",
+                    "请先完成当前单，完成后系统会自动推送下一单。\n"
+                    "若当前单已不用做，回复【取消】结束分仓任务后会自动推送排队单。",
                 )
             except Exception as exc:
                 self.logger.warning("notify ops queue failed: %s", exc)
@@ -1456,6 +1472,26 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             except Exception as exc:
                 self.logger.warning(f"清理流程文件夹失败 {target_folder}: {exc}")
     
+    def _handle_ops_cancel(self, incoming_message, user_role: str):
+        """运营放弃当前分仓单（含同文件双 key / 排队），并尝试推送不分仓排队。"""
+        if user_role != "operation" and not self._is_operation_or_dual(incoming_message, user_role):
+            self._send_text_reply(
+                "运营可回复【取消】结束自己当前的分仓任务。物流请用【重置】。",
+                incoming_message,
+            )
+            return
+        staff_id = getattr(incoming_message, "sender_staff_id", None)
+        sender_id = getattr(incoming_message, "sender_id", None)
+        user_id = getattr(incoming_message, "sender_user_id", None) or staff_id or sender_id
+        dropped = self.state_manager.drop_ops_jobs(user_id, staff_id, sender_id)
+        if not dropped:
+            self._send_text_reply("当前没有进行中的分仓任务。", incoming_message)
+            return
+        self._send_text_reply("已取消您当前的分仓任务（含队列）。", incoming_message)
+        if user_id:
+            self._kick_peer_promote(str(user_id))
+        self.logger.info("lcl ops cancelled jobs=%s user=%s", dropped, user_id)
+
     def _handle_reset_command(self, incoming_message, user_role: str):
         """处理重置命令：物流只清自己会话，不影响运营进行中/排队任务。"""
         # 只有物流人员可以重置

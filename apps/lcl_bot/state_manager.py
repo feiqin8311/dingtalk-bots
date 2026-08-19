@@ -207,8 +207,112 @@ class StateManager:
         }
 
     def ops_is_busy(self, ops_id: str) -> bool:
-        active = (self.state.get("ops_active") or {}).get(str(ops_id))
-        return bool(active)
+        self.expire_stale_ops_jobs()
+        return self.find_ops_job(ops_id) is not None
+
+    @staticmethod
+    def _job_dt(job: Optional[Dict[str, Any]]):
+        if not job:
+            return None
+        for key in ("updated_at", "created_at"):
+            raw = job.get(key)
+            if not raw:
+                continue
+            try:
+                return datetime.fromisoformat(str(raw))
+            except ValueError:
+                continue
+        return None
+
+    def find_ops_job(self, ops_id: str, extra_ids: Optional[list] = None) -> Optional[Dict[str, Any]]:
+        active = self.state.get("ops_active") or {}
+        idset = {str(ops_id)}
+        for extra in extra_ids or []:
+            if extra:
+                idset.add(str(extra))
+        for key, job in active.items():
+            if key in idset:
+                return job
+        return None
+
+    def expire_stale_ops_jobs(self, now: Optional[datetime] = None, ttl_sec: Optional[int] = None) -> list:
+        """Drop idle WAIT_AMAZON ops jobs past TTL. Other statuses stay until 删除/取消."""
+        now = now or datetime.now()
+        ttl = int(ttl_sec if ttl_sec is not None else getattr(config, "OPS_TTL_SEC", 259200))
+        active = dict(self.state.get("ops_active") or {})
+        dropped: list[str] = []
+        for key, job in list(active.items()):
+            status = (job or {}).get("status") or "WAIT_AMAZON"
+            if status != "WAIT_AMAZON":
+                continue
+            started = self._job_dt(job)
+            if started is None or (now - started).total_seconds() > ttl:
+                active.pop(key)
+                dropped.append(key)
+        if not dropped:
+            return []
+        self.state["ops_active"] = active
+        if not active and not (self.state.get("ops_queue") or {}):
+            self.state["status"] = WorkflowState.IDLE
+            self.state["operation_user_id"] = None
+            self.state["operation_user_ids"] = []
+        self._save_state()
+        return dropped
+
+    def drop_ops_jobs(self, *ids) -> list:
+        """Remove active jobs for these ids, plus aliases sharing the same packing file."""
+        idset = {str(i) for i in ids if i}
+        if not idset:
+            return []
+        active = dict(self.state.get("ops_active") or {})
+        paths = {
+            (active[key] or {}).get("packing_result_path")
+            for key in list(active)
+            if key in idset
+        }
+        dropped: list[str] = []
+        for key, job in list(active.items()):
+            path = (job or {}).get("packing_result_path")
+            if key in idset or (path and path in paths):
+                active.pop(key)
+                dropped.append(key)
+        if not dropped:
+            return []
+        self.state["ops_active"] = active
+        queue = dict(self.state.get("ops_queue") or {})
+        for key in list(queue):
+            if key in idset:
+                queue.pop(key, None)
+        self.state["ops_queue"] = queue
+        if not active:
+            self.state["status"] = WorkflowState.IDLE
+            self.state["operation_user_id"] = None
+            self.state["operation_user_ids"] = []
+        self._save_state()
+        return dropped
+
+    def touch_ops_job(self, *ids) -> None:
+        idset = {str(i) for i in ids if i}
+        if not idset:
+            return
+        active = dict(self.state.get("ops_active") or {})
+        paths = {
+            (job or {}).get("packing_result_path")
+            for key, job in active.items()
+            if key in idset
+        }
+        now = datetime.now().isoformat()
+        changed = False
+        for key, job in list(active.items()):
+            path = (job or {}).get("packing_result_path")
+            if key in idset or (path and path in paths):
+                job = dict(job or {})
+                job["updated_at"] = now
+                active[key] = job
+                changed = True
+        if changed:
+            self.state["ops_active"] = active
+            self._save_state()
 
     @staticmethod
     def shipment_keys_from_job(job: Optional[Dict[str, Any]]) -> frozenset:
@@ -286,6 +390,9 @@ class StateManager:
         ops_id = str(ops_id)
         job = dict(job)
         job["status"] = job.get("status") or "WAIT_AMAZON"
+        now = datetime.now().isoformat()
+        job.setdefault("created_at", now)
+        job["updated_at"] = now
         active = dict(self.state.get("ops_active") or {})
         active[ops_id] = job
         self.state["ops_active"] = active
@@ -436,7 +543,13 @@ class StateManager:
         finishing = self.state.get("operation_user_id")
         next_job = None
         if finishing:
-            ops_active.pop(str(finishing), None)
+            finish_job = ops_active.get(str(finishing)) or {}
+            finish_path = finish_job.get("packing_result_path")
+            for key, other in list(ops_active.items()):
+                if key == str(finishing) or (
+                    finish_path and (other or {}).get("packing_result_path") == finish_path
+                ):
+                    ops_active.pop(key, None)
             items = list(ops_queue.get(str(finishing)) or [])
             if items:
                 next_job = items.pop(0)
