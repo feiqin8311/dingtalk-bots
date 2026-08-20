@@ -43,6 +43,16 @@ class LclLingxingDeleteTest(unittest.TestCase):
         with self.assertRaises(api.LingXingApiError):
             asyncio.run(api.delete_shipment_list([]))
 
+    def test_parse_shipment_nos_strips_list_repr(self):
+        from lcl_bot.handlers import WorkflowBotHandler
+
+        parse = WorkflowBotHandler._parse_shipment_nos
+        expected = ["SP260819043", "SP260819042", "SP260819041"]
+        self.assertEqual(parse(expected), expected)
+        self.assertEqual(parse("SP260819043 SP260819042 SP260819041"), expected)
+        self.assertEqual(parse(str(expected)), expected)
+        self.assertEqual(parse(["['SP260819043", "'SP260819042", "'SP260819041]"]), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

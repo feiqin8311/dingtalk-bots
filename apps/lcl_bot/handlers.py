@@ -925,16 +925,20 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 self._send_text_reply("⚠️ 未找到发货单号，无法调用删除接口，流程将直接结束。", incoming_message)
             else:
                 try:
+                    self.logger.info("lcl delete shipment_nos=%s", shipment_nos)
                     api_resp = await delete_shipment_list(shipment_nos)
-                    # 简化消息展示，不再返回完整 JSON
-                    if api_resp.get('code') == 0:
-                        status_msg = "✅ 删除成功"
-                    else:
-                        status_msg = f"❌ 删除失败：{api_resp.get('message', '未知错误')}"
-                    
+                    self.logger.info("lcl delete resp=%s", api_resp)
+                    if api_resp.get('code') != 0:
+                        self._send_text_reply(
+                            f"📦 发货单号：{', '.join(shipment_nos)}\n"
+                            f"❌ 删除失败：{api_resp.get('message', '未知错误')}\n"
+                            "可回复【删除】重试，或回复【不删除】结束流程。",
+                            incoming_message,
+                        )
+                        return
                     self._send_text_reply(
                         f"📦 发货单号：{', '.join(shipment_nos)}\n"
-                        f"✉️ 结果：{status_msg}",
+                        "✉️ 结果：✅ 删除成功",
                         incoming_message
                     )
                 except Exception as exc:
@@ -1724,12 +1728,24 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
 
         return ' '.join(unique_numbers) if unique_numbers else None
 
-    def _parse_shipment_nos(self, shipping_numbers: Optional[str]) -> List[str]:
-        """将发货单号字符串解析为列表"""
+    @staticmethod
+    def _parse_shipment_nos(shipping_numbers) -> List[str]:
+        """list 或空格串都能拆出 SP 单号；避免 str(list) 把引号送进领星。"""
         if not shipping_numbers:
             return []
-        parts = re.split(r'[\s,;]+', str(shipping_numbers).strip())
-        return [part for part in parts if part]
+        if isinstance(shipping_numbers, (list, tuple, set)):
+            parts = [str(x) for x in shipping_numbers]
+        else:
+            parts = re.split(r"[\s,;]+", str(shipping_numbers).strip())
+        out: List[str] = []
+        seen = set()
+        for part in parts:
+            for match in re.finditer(r"SP[0-9A-Za-z]+", str(part), flags=re.I):
+                sn = match.group(0).upper()
+                if sn not in seen:
+                    seen.add(sn)
+                    out.append(sn)
+        return out
 
     def _build_amazon_filename(self, shipping_numbers: Optional[str], template_index: int,
                                fallback_identifier: str) -> str:
