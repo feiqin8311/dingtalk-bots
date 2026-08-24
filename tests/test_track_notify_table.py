@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +12,7 @@ if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 
 from dedup_store import TrackStateStore  # noqa: E402
-from dingtalk_table import TableRow, _split_codes, _ts_to_date  # noqa: E402
+from dingtalk_table import CST, TableRow, _split_codes, _ts_to_date  # noqa: E402
 
 
 class DingTalkRequestRetryTests(unittest.TestCase):
@@ -64,6 +64,45 @@ class DingTalkRequestRetryTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as ctx:
                     client._request("POST", "https://example.test/x", {}, auth=False)
         self.assertIn("after 2 tries", str(ctx.exception))
+
+
+def _ms(d: date) -> int:
+    return int(datetime(d.year, d.month, d.day, tzinfo=CST).timestamp() * 1000)
+
+
+class CandidateFilterTests(unittest.TestCase):
+    def test_blank_eta_included_future_eta_excluded(self):
+        from unittest.mock import patch
+
+        from dingtalk_table import DingTalkNotableClient
+
+        today = date(2026, 8, 24)
+        shipped = _ms(date(2026, 5, 18))
+
+        def rec(rid: str, eta, delivered=None):
+            fields = {
+                "货代公司": "平谊",
+                "发票号": rid,
+                "发货时间": shipped,
+                "实际送仓时间": delivered,
+            }
+            if eta is not None:
+                fields["预计船期"] = eta
+            return {"id": rid, "fields": fields}
+
+        records = [
+            rec("past", _ms(date(2026, 7, 1))),
+            rec("today", _ms(today)),
+            rec("blank", None),
+            rec("empty_str", ""),
+            rec("future", _ms(date(2026, 9, 1))),
+            rec("delivered", None, delivered=_ms(date(2026, 8, 1))),
+        ]
+        client = DingTalkNotableClient("k", "s", operator_union_id="op")
+        with patch.object(client, "list_all_records", return_value=records):
+            rows = client.iter_candidate_rows("doc", "sheet", today=today)
+        invoices = [r.invoice_no for r in rows]
+        self.assertEqual(invoices, ["past", "today", "blank", "empty_str"])
 
 
 class HelpersTests(unittest.TestCase):

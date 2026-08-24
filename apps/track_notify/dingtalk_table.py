@@ -232,7 +232,7 @@ class DingTalkNotableClient:
         """
         筛选：
         - 发货时间年份 = ship_year（列「发货时间」为毫秒时间戳 int；None 表示不限年）
-        - 预计船期≤今天 且 实际送仓时间为空
+        - 预计船期≤今天或空白，且实际送仓时间为空
         - 货代命中 keywords 任一
         """
         today = today or datetime.now(tz=CST).date()
@@ -257,7 +257,7 @@ class DingTalkNotableClient:
             delivered = _ts_to_date(fields.get("实际送仓时间"))
             if delivered is not None:
                 continue
-            if eta is None or eta > today:
+            if eta is not None and eta > today:
                 continue
             rows.append(
                 TableRow(
