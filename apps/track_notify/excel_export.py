@@ -26,8 +26,10 @@ HEADERS = (
     "实际送仓时间",
     "负责人",
     "物流详情",
+    "物流状态",
+    "发生时间",
 )
-_DETAIL_COL = 11  # 物流详情列（1-based）
+_WRAP_COLS = (11, 12, 13)  # 物流详情 / 物流状态 / 发生时间（1-based）
 
 
 @dataclass
@@ -53,6 +55,8 @@ class ReportItem:
     event_keys: list[str] = field(default_factory=list)
 
     def excel_row(self) -> list[str]:
+        text = self.detail or self.message
+        status, occur_at = split_detail_columns(text)
         return [
             self.invoice_no,
             self.brand,
@@ -64,7 +68,9 @@ class ReportItem:
             self.eta_date,
             self.delivered_at,
             self.owners,
-            self.detail or self.message,
+            text,
+            status,
+            occur_at,
         ]
 
     def keys_to_mark(self) -> list[str]:
@@ -73,6 +79,24 @@ class ReportItem:
 
 def detail_line_has_date(line: str) -> bool:
     return bool(_DETAIL_DATE_PREFIX.match((line or "").strip()))
+
+
+def split_detail_columns(text: str) -> tuple[str, str]:
+    """物流详情 → (物流状态, 发生时间)，多行按行对齐。无日期则发生时间为空。"""
+    statuses: list[str] = []
+    times: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = _DETAIL_DATE_PREFIX.match(line)
+        if m:
+            times.append(m.group(0))
+            statuses.append(line[m.end() :].strip())
+        else:
+            times.append("")
+            statuses.append(line)
+    return "\n".join(statuses), "\n".join(times)
 
 
 _ISSUE_KEYS = frozenset(
@@ -122,9 +146,10 @@ def write_report_xlsx(items: Iterable[ReportItem], path: Path) -> Path:
     wrap = Alignment(wrap_text=True, vertical="top")
     for item in items:
         ws.append(item.excel_row())
-        ws.cell(row=ws.max_row, column=_DETAIL_COL).alignment = wrap
+        for col in _WRAP_COLS:
+            ws.cell(row=ws.max_row, column=col).alignment = wrap
     for col, width in enumerate(
-        [14, 12, 10, 18, 22, 10, 12, 12, 14, 14, 48], start=1
+        [14, 12, 10, 18, 22, 10, 12, 12, 14, 14, 48, 28, 14], start=1
     ):
         ws.column_dimensions[chr(64 + col)].width = width
     wb.save(path)

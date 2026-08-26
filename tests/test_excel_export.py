@@ -18,6 +18,7 @@ from excel_export import (  # noqa: E402
     export_filename,
     filter_report_item,
     format_shipped_at,
+    split_detail_columns,
     write_report_xlsx,
 )
 from owners import KEPENGXIANG_USER_ID  # noqa: E402
@@ -56,6 +57,8 @@ class ExcelExportTests(unittest.TestCase):
                 "实际送仓时间",
                 "负责人",
                 "物流详情",
+                "物流状态",
+                "发生时间",
             ),
         )
 
@@ -115,9 +118,13 @@ class ExcelExportTests(unittest.TestCase):
             self.assertEqual(ws["I2"].value, None)  # openpyxl empty → None
             self.assertEqual(ws["J2"].value, "芋圆")
             self.assertEqual(ws["K2"].value, "2026-07-01 离港")
+            self.assertEqual(ws["L2"].value, "离港")
+            self.assertEqual(ws["M2"].value, "2026-07-01")
             self.assertEqual(ws["H3"].value, "2026-07-30")
             self.assertEqual(ws["I3"].value, "2026-08-02")
             self.assertEqual(ws["K3"].value, "26LBA22 无FBA编码，无法查询平谊轨迹")
+            self.assertEqual(ws["L3"].value, "26LBA22 无FBA编码，无法查询平谊轨迹")
+            self.assertEqual(ws["M3"].value, None)
 
     def test_multiline_detail_one_cell(self):
         detail = "2026-07-01 离港\n2026-07-10 清关\n2026-07-15 派送中"
@@ -146,7 +153,19 @@ class ExcelExportTests(unittest.TestCase):
             ws = wb.active
             self.assertEqual(ws.max_row, 2)
             self.assertEqual(ws["K2"].value, detail)
+            self.assertEqual(ws["L2"].value, "离港\n清关\n派送中")
+            self.assertEqual(ws["M2"].value, "2026-07-01\n2026-07-10\n2026-07-15")
             self.assertTrue(ws["K2"].alignment.wrap_text)
+            self.assertTrue(ws["L2"].alignment.wrap_text)
+            self.assertTrue(ws["M2"].alignment.wrap_text)
+
+    def test_split_detail_columns(self):
+        self.assertEqual(
+            split_detail_columns("2026-07-01 离港\n2026-07-10 清关"),
+            ("离港\n清关", "2026-07-01\n2026-07-10"),
+        )
+        self.assertEqual(split_detail_columns("已到达卸货港"), ("已到达卸货港", ""))
+        self.assertEqual(split_detail_columns(""), ("", ""))
 
     def test_detail_line_has_date(self):
         self.assertTrue(detail_line_has_date("2026-07-29 出发地 中国宁波"))
