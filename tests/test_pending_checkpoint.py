@@ -109,7 +109,13 @@ class PendingCheckpointTests(unittest.TestCase):
 
 class ScheduleAndDeliverTests(unittest.TestCase):
     def test_next_run_at_mon_wed_0700_and_catchup(self):
-        from main import SCHEDULE_HOUR, _next_run_at
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("track_notify_main", APP / "main.py")
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+        SCHEDULE_HOUR, _next_run_at = mod.SCHEDULE_HOUR, mod._next_run_at
 
         self.assertEqual(SCHEDULE_HOUR, 7)
         mon_before = datetime(2026, 8, 3, 6, 59, 0, tzinfo=CST)
@@ -125,10 +131,17 @@ class ScheduleAndDeliverTests(unittest.TestCase):
         )
 
     def test_deliver_defers_mark_until_all_recipients_ok(self):
+        import importlib.util
         from unittest.mock import MagicMock
 
         from runner import _deliver_excel_reports
-        from settings import TrackNotifyConfig
+
+        spec = importlib.util.spec_from_file_location("track_notify_settings", APP / "settings.py")
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules["track_notify_settings"] = mod
+        spec.loader.exec_module(mod)
+        TrackNotifyConfig = mod.TrackNotifyConfig
 
         def _cfg(state_dir: Path) -> TrackNotifyConfig:
             return TrackNotifyConfig(

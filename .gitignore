@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 .env
+.env.*
+.env.bak*
+.codegraph/
 .bot-workspace/
 downloads/
 .DS_Store

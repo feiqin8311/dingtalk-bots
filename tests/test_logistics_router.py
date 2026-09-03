@@ -46,9 +46,16 @@ def _load_router_module():
     class _Spec:
         loader = _Loader()
 
+    settings_spec = importlib.util.spec_from_file_location("settings", LOGISTICS_DIR / "settings.py")
+    settings_mod = importlib.util.module_from_spec(settings_spec)
+    assert settings_spec.loader is not None
+    sys.modules["settings"] = settings_mod
+    settings_spec.loader.exec_module(settings_mod)
+
     with patch.dict(
         sys.modules,
         {
+            "settings": settings_mod,
             "dingtalk_stream": MagicMock(),
             "dingtalk_stream.chatbot": MagicMock(),
             "handler": MagicMock(ShipmentQueryHandler=MagicMock()),

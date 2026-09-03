@@ -893,18 +893,36 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
 
     async def _handle_delete_decision(self, incoming_message, user_role: str, delete: bool):
         """处理运营确认是否删除发货单"""
-        if not self.state_manager.is_waiting_for_delete_confirmation():
+        sender_id = incoming_message.sender_id
+        sender_user_id = getattr(incoming_message, 'sender_user_id', None)
+        sender_staff_id = getattr(incoming_message, 'sender_staff_id', None)
+
+        candidate_ids = [cid for cid in (sender_staff_id, sender_user_id, sender_id) if cid]
+        normalized_id = self._normalize_recipient_id(sender_id)
+        if normalized_id and normalized_id not in candidate_ids:
+            candidate_ids.append(normalized_id)
+
+        matched_ops_id = None
+        for cid in candidate_ids:
+            if self.state_manager.find_ops_job(cid):
+                matched_ops_id = cid
+                self.state_manager.bind_ops_job_to_state(cid)
+                break
+
+        is_waiting = False
+        for cid in candidate_ids:
+            if self.state_manager.is_waiting_for_delete_confirmation(cid):
+                is_waiting = True
+                break
+        if not is_waiting and not self.state_manager.is_waiting_for_delete_confirmation():
             self._send_text_reply("⚠️ 当前没有待确认的删除操作。", incoming_message)
             return
 
         # 特殊场景：同一人兼任物流与运营
         is_dual_role = False
         if user_role == 'logistics':
-            sender_id = incoming_message.sender_id
-            sender_user_id = getattr(incoming_message, 'sender_user_id', None)
-            sender_staff_id = getattr(incoming_message, 'sender_staff_id', None)
             # 检查是否同时也是运营人员
-            for identifier in [sender_id, sender_user_id, sender_staff_id]:
+            for identifier in candidate_ids:
                 if identifier and identifier in config.OPERATION_USERS:
                     is_dual_role = True
                     self.logger.info("检测到物流账号兼任运营，允许执行删除确认")
@@ -972,7 +990,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 self.logger.error(f"通知物流人员失败: {exc}")
 
         self._send_text_reply("✅ 流程已结束。", incoming_message)
-        self._reset_workflow()
+        self._reset_workflow(matched_ops_id or stored_operation_id)
         self.logger.info("删除确认完成，流程结束")
 
     def _looks_like_lcl_packing_result(self, file_path: str) -> bool:

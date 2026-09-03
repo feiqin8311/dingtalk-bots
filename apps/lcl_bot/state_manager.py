@@ -137,9 +137,28 @@ class StateManager:
         self._save_state()
         print(f"✅ 状态已更新: {WorkflowState.WAIT_OPS_SELECT}")
 
-    def is_waiting_for_delete_confirmation(self) -> bool:
+    def is_waiting_for_delete_confirmation(self, ops_user_id: Optional[str] = None) -> bool:
         """检查是否等待运营确认删除发货单"""
-        return self.get_status() == WorkflowState.WAIT_DELETE_CONFIRMATION
+        if self.get_status() == WorkflowState.WAIT_DELETE_CONFIRMATION:
+            if not ops_user_id:
+                return True
+            active = (self.state.get("ops_active") or {}).get(str(ops_user_id))
+            if active:
+                return active.get("status") == WorkflowState.WAIT_DELETE_CONFIRMATION
+            op_ids = self.state.get("operation_user_ids") or []
+            if self.state.get("operation_user_id") == str(ops_user_id) or str(ops_user_id) in op_ids:
+                return True
+            return False
+        # 物流会话重置后，全局 status 可能已被切换，从 ops_active 检查
+        active_map = self.state.get("ops_active") or {}
+        if ops_user_id:
+            job = active_map.get(str(ops_user_id))
+            return bool(job and job.get("status") == WorkflowState.WAIT_DELETE_CONFIRMATION)
+        return any(
+            j.get("status") == WorkflowState.WAIT_DELETE_CONFIRMATION
+            for j in active_map.values()
+            if isinstance(j, dict)
+        )
 
     def set_logistics_uploaded(self, logistics_user_id: str, logistics_file_path: str, 
                                packing_result_path: str, conversation_id: str,
@@ -389,7 +408,8 @@ class StateManager:
         """设为运营当前处理单，并绑定到全局字段供现有 handler 使用。"""
         ops_id = str(ops_id)
         job = dict(job)
-        job["status"] = job.get("status") or "WAIT_AMAZON"
+        job_status = job.get("status") or "WAIT_AMAZON"
+        job["status"] = job_status
         now = datetime.now().isoformat()
         job.setdefault("created_at", now)
         job["updated_at"] = now
@@ -411,10 +431,16 @@ class StateManager:
             "shop_full",
             "country",
             "transport_method",
+            "amazon_file_path",
         ):
             if job.get(key) is not None:
                 self.state[key] = job.get(key)
-        self.state["status"] = WorkflowState.LOGISTICS_CONFIRMED
+        if job_status == WorkflowState.WAIT_DELETE_CONFIRMATION:
+            self.state["status"] = WorkflowState.WAIT_DELETE_CONFIRMATION
+        elif job_status == WorkflowState.OPERATION_UPLOADED:
+            self.state["status"] = WorkflowState.OPERATION_UPLOADED
+        else:
+            self.state["status"] = WorkflowState.LOGISTICS_CONFIRMED
         self._save_state()
 
     def release_logistics_session(self) -> None:
@@ -441,10 +467,17 @@ class StateManager:
                 "shop_full",
                 "country",
                 "transport_method",
+                "amazon_file_path",
             ):
                 if job.get(key) is not None:
                     self.state[key] = job.get(key)
-            self.state["status"] = WorkflowState.LOGISTICS_CONFIRMED
+            job_status = job.get("status")
+            if job_status == WorkflowState.WAIT_DELETE_CONFIRMATION:
+                self.state["status"] = WorkflowState.WAIT_DELETE_CONFIRMATION
+            elif job_status == WorkflowState.OPERATION_UPLOADED:
+                self.state["status"] = WorkflowState.OPERATION_UPLOADED
+            else:
+                self.state["status"] = WorkflowState.LOGISTICS_CONFIRMED
         else:
             self.state["status"] = WorkflowState.IDLE
             self.state["operation_user_id"] = None
@@ -515,8 +548,15 @@ class StateManager:
     def set_waiting_for_delete_confirmation(self, operation_user_id: Optional[str] = None):
         """设置等待删除确认状态"""
         self.state['status'] = WorkflowState.WAIT_DELETE_CONFIRMATION
-        if operation_user_id:
-            self.state['operation_user_id'] = operation_user_id
+        op_id = str(operation_user_id or self.state.get('operation_user_id') or "")
+        if op_id:
+            self.state['operation_user_id'] = op_id
+            active = dict(self.state.get("ops_active") or {})
+            job = dict(active.get(op_id) or {})
+            if job:
+                job["status"] = WorkflowState.WAIT_DELETE_CONFIRMATION
+                active[op_id] = job
+                self.state["ops_active"] = active
         self._save_state()
         print(f"✅ 状态已更新: {WorkflowState.WAIT_DELETE_CONFIRMATION}")
 
