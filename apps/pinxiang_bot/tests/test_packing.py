@@ -16,6 +16,7 @@ if str(APP_DIR) not in sys.path:
 from packing import (  # noqa: E402
     LineItem,
     TEMPLATE1_SHEET,
+    _build_line_items,
     compute_packing,
     load_packing_result_workbook,
     process_shipment_file,
@@ -137,6 +138,40 @@ class PackingLogicTests(unittest.TestCase):
         self.assertTrue(all(r.remark == "多SKU合箱" for r in result.rows))
         self.assertEqual(result.rows[0].box_group_id, result.rows[1].box_group_id)
         self.assertAlmostEqual(result.rows[0].box_weight_kg, result.rows[1].box_weight_kg)
+
+    def test_same_sku_keeps_warehouse_per_shipment(self):
+        pack_header = [
+            "发货单号",
+            "SKU",
+            "发货数量",
+            "单箱数量",
+            "箱子毛重（kg）",
+            "箱子长度（cm）",
+            "箱子宽度（cm）",
+            "箱子高度（cm）",
+        ]
+        pack_rows = [
+            pack_header,
+            ["SP1", "80FD4011", 75, 3, 13.5, 39, 24, 35.5],
+            [None, "80FD8010", 306, 18, 16.1, 39, 39, 25],
+            ["SP2", "80FD4011", 123, 3, 13.5, 39, 24, 35.5],
+        ]
+        detail_header = ["发货单号", "发货仓库（单据）", "SKU", "MSKU", "品名", "发货量"]
+        detail_rows = [
+            detail_header,
+            ["SP1", "杭州虚拟仓", "80FD4011", "80FD4011", "x", 75],
+            [None, None, "80FD8010", "80FD8010", "y", 306],
+            ["SP2", "青山湖仓库", "80FD4011", "80FD4011", "x", 123],
+        ]
+        items = _build_line_items(pack_rows, detail_rows, {})
+        self.assertEqual(
+            [(i.shipment_sn, i.warehouse, i.sku, i.qty) for i in items],
+            [
+                ("SP1", "杭州虚拟仓", "80FD4011", 75.0),
+                ("SP1", "杭州虚拟仓", "80FD8010", 306.0),
+                ("SP2", "青山湖仓库", "80FD4011", 123.0),
+            ],
+        )
 
     def test_different_warehouse_not_combined(self):
         result = compute_packing(

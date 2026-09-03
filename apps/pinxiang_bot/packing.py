@@ -833,7 +833,8 @@ def _build_line_items(
     pack_idx = _header_index(pack_header)
     detail_idx = _header_index(detail_header)
 
-    detail_by_sku: dict[str, dict[str, Any]] = {}
+    # 同一 SKU 可出现在不同发货单/仓库；按 (发货单号, SKU) 记，避免后单覆盖前单仓库
+    detail_by_sn_sku: dict[tuple[str, str], dict[str, Any]] = {}
     last_wh = ""
     last_sn = ""
     for raw in detail_rows[1:]:
@@ -854,7 +855,7 @@ def _build_line_items(
             last_sn = sn
         else:
             sn = last_sn
-        detail_by_sku[sku] = {
+        detail_by_sn_sku[(sn, sku)] = {
             "warehouse": wh,
             "shipment_sn": sn,
             "msku": _cell_str(_get(raw, detail_idx, "MSKU")) or sku,
@@ -882,7 +883,7 @@ def _build_line_items(
         else:
             sn = last_sn
 
-        detail = detail_by_sku.get(sku, {})
+        detail = detail_by_sn_sku.get((sn, sku), {})
         warehouse = wh or str(detail.get("warehouse") or "")
         shipment_sn = sn or str(detail.get("shipment_sn") or "")
         msku = str(detail.get("msku") or sku)
