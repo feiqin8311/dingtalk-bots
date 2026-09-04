@@ -60,8 +60,7 @@ def parse_rules_table(raw_text: str) -> list[SplitRule]:
 
 
 def parse_rules_workbook(content: bytes) -> list[SplitRule]:
-    workbook = load_workbook(filename=io.BytesIO(content), read_only=True, data_only=True)
-    sheet = workbook.worksheets[0]
+    sheet = _open_first_sheet(content)
     rules: list[SplitRule] = []
 
     for row_index, raw_row in enumerate(sheet.iter_rows(values_only=True), start=1):
@@ -95,24 +94,33 @@ def parse_rules_workbook(content: bytes) -> list[SplitRule]:
 
 
 def build_rules_from_workbook(content: bytes, pdf_source: str | Path | Iterable[str]) -> list[SplitRule]:
-    workbook = load_workbook(filename=io.BytesIO(content), read_only=True, data_only=True)
-    sheet = workbook.worksheets[0]
+    sheet = _open_first_sheet(content)
     header_row, column_indexes = _locate_workbook_layout(sheet)
-    if _workbook_has_explicit_page_values(sheet, header_row, column_indexes):
-        return _build_rules_from_explicit_pages(sheet, header_row, column_indexes)
+    rows = _collect_workbook_rows(sheet, header_row, column_indexes)
+    claimed_pages: set[int] = set()
+    for row_index, _supplier, _sku, page_spec in rows:
+        if page_spec:
+            claimed_pages.update(_parse_page_numbers(page_spec, row_index))
 
-    page_texts = _load_page_texts(pdf_source)
+    has_sku_without_page = any(sku and not page_spec for _row_index, _supplier, sku, page_spec in rows)
+    fully_explicit = bool(claimed_pages) and not has_sku_without_page
+    page_texts = [] if fully_explicit else _load_page_texts(pdf_source)
     rules: list[SplitRule] = []
-    matched_pages: set[int] = set()
+    matched_pages = set(claimed_pages)
     warehouse_supplier = "仓库发"
 
-    for row_index, raw_row in enumerate(
-        sheet.iter_rows(min_row=header_row + 1, values_only=True),
-        start=header_row + 1,
-    ):
-        supplier = _normalize_cell(raw_row[column_indexes["supplier"]]) if column_indexes["supplier"] < len(raw_row) else ""
-        sku = _normalize_cell(raw_row[column_indexes["sku"]]) if column_indexes["sku"] < len(raw_row) else ""
-        if not supplier and not sku:
+    for row_index, supplier, sku, page_spec in rows:
+        if page_spec:
+            if not supplier:
+                raise RuleParseError(f"Malformed rule row at Excel row {row_index}: missing 供应商 or 拆分页面")
+            rules.append(
+                SplitRule(
+                    company_name=supplier,
+                    reference_code=sku,
+                    page_spec=page_spec,
+                    line_number=row_index,
+                )
+            )
             continue
         if supplier and not sku:
             warehouse_supplier = supplier
@@ -123,12 +131,11 @@ def build_rules_from_workbook(content: bytes, pdf_source: str | Path | Iterable[
         matching_pages = [
             page_number
             for page_number, page_text in enumerate(page_texts, start=1)
-            if _page_contains_sku(page_text, sku)
+            if page_number not in matched_pages and _page_contains_sku(page_text, sku)
         ]
         if not matching_pages:
             continue
         matched_pages.update(matching_pages)
-
         rules.append(
             SplitRule(
                 company_name=supplier,
@@ -138,20 +145,21 @@ def build_rules_from_workbook(content: bytes, pdf_source: str | Path | Iterable[
             )
         )
 
-    remaining_pages = [
-        page_number
-        for page_number in range(1, len(page_texts) + 1)
-        if page_number not in matched_pages
-    ]
-    if remaining_pages:
-        rules.append(
-            SplitRule(
-                company_name=warehouse_supplier,
-                reference_code="",
-                page_spec=_compress_page_numbers(remaining_pages),
-                line_number=header_row,
+    if not fully_explicit:
+        remaining_pages = [
+            page_number
+            for page_number in range(1, len(page_texts) + 1)
+            if page_number not in matched_pages
+        ]
+        if remaining_pages:
+            rules.append(
+                SplitRule(
+                    company_name=warehouse_supplier,
+                    reference_code="",
+                    page_spec=_compress_page_numbers(remaining_pages),
+                    line_number=header_row,
+                )
             )
-        )
 
     if not rules:
         raise RuleParseError("rule workbook did not contain any usable rows")
@@ -159,10 +167,18 @@ def build_rules_from_workbook(content: bytes, pdf_source: str | Path | Iterable[
 
 
 def workbook_uses_explicit_pages(content: bytes) -> bool:
-    workbook = load_workbook(filename=io.BytesIO(content), read_only=True, data_only=True)
-    sheet = workbook.worksheets[0]
+    """True only when every SKU row already has a page range (skip SKU matching + preview)."""
+    sheet = _open_first_sheet(content)
     header_row, column_indexes = _locate_workbook_layout(sheet)
-    return _workbook_has_explicit_page_values(sheet, header_row, column_indexes)
+    rows = _collect_workbook_rows(sheet, header_row, column_indexes)
+    has_page = False
+    has_sku_without_page = False
+    for _row_index, _supplier, sku, page_spec in rows:
+        if page_spec:
+            has_page = True
+        elif sku:
+            has_sku_without_page = True
+    return has_page and not has_sku_without_page
 
 
 def format_rule_preview_table(rules: list[SplitRule]) -> str:
@@ -207,6 +223,18 @@ def _is_header_row(cells: list[str]) -> bool:
     return first in {"公司名", "company", "company name"} and third in {"页数范围", "page range", "pages"}
 
 
+def _open_first_sheet(content: bytes):
+    # ponytail: WPS/腾讯文档常写 dimension=A1，read_only 会只读到第一列
+    workbook = load_workbook(filename=io.BytesIO(content), data_only=True)
+    return workbook.worksheets[0]
+
+
+def _cell(raw_row, index: int | None) -> str:
+    if index is None or index >= len(raw_row):
+        return ""
+    return _normalize_cell(raw_row[index])
+
+
 def _locate_workbook_layout(sheet) -> tuple[int, dict[str, int]]:
     for row_index, raw_row in enumerate(sheet.iter_rows(values_only=True), start=1):
         cells = [_normalize_cell(value) for value in raw_row]
@@ -222,42 +250,43 @@ def _locate_workbook_layout(sheet) -> tuple[int, dict[str, int]]:
     raise RuleParseError("Excel first sheet did not contain any usable rows")
 
 
-def _build_rules_from_explicit_pages(sheet, header_row: int, column_indexes: dict[str, int]) -> list[SplitRule]:
-    rules: list[SplitRule] = []
+def _collect_workbook_rows(
+    sheet, header_row: int, column_indexes: dict[str, int]
+) -> list[tuple[int, str, str, str]]:
+    rows: list[tuple[int, str, str, str]] = []
     for row_index, raw_row in enumerate(
         sheet.iter_rows(min_row=header_row + 1, values_only=True),
         start=header_row + 1,
     ):
-        supplier = _normalize_cell(raw_row[column_indexes["supplier"]]) if column_indexes["supplier"] < len(raw_row) else ""
-        sku_index = column_indexes.get("sku")
-        sku = _normalize_cell(raw_row[sku_index]) if sku_index is not None and sku_index < len(raw_row) else ""
-        page_spec = _normalize_cell(raw_row[column_indexes["page_spec"]]) if column_indexes["page_spec"] < len(raw_row) else ""
+        supplier = _cell(raw_row, column_indexes["supplier"])
+        sku = _cell(raw_row, column_indexes.get("sku"))
+        page_spec = _cell(raw_row, column_indexes.get("page_spec"))
         if not supplier and not sku and not page_spec:
             continue
-        if not supplier or not page_spec:
-            raise RuleParseError(f"Malformed rule row at Excel row {row_index}: missing 供应商 or 拆分页面")
-        rules.append(
-            SplitRule(
-                company_name=supplier,
-                reference_code=sku,
-                page_spec=page_spec,
-                line_number=row_index,
-            )
-        )
-    if not rules:
-        raise RuleParseError("rule workbook did not contain any usable rows")
-    return rules
+        rows.append((row_index, supplier, sku, page_spec))
+    return rows
 
 
-def _workbook_has_explicit_page_values(sheet, header_row: int, column_indexes: dict[str, int]) -> bool:
-    page_spec_index = column_indexes.get("page_spec")
-    if page_spec_index is None:
-        return False
-
-    for raw_row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
-        if page_spec_index < len(raw_row) and _normalize_cell(raw_row[page_spec_index]):
-            return True
-    return False
+def _parse_page_numbers(page_spec: str, line_number: int) -> list[int]:
+    result: list[int] = []
+    chunks = [chunk.strip() for chunk in page_spec.split(",") if chunk.strip()]
+    if not chunks:
+        raise RuleParseError(f"Malformed rule row at Excel row {line_number}: missing 拆分页面")
+    for chunk in chunks:
+        if "-" in chunk:
+            start_str, end_str = [part.strip() for part in chunk.split("-", 1)]
+            if not start_str.isdigit() or not end_str.isdigit():
+                raise RuleParseError(f"Invalid page range at Excel row {line_number}: {chunk}")
+            start = int(start_str)
+            end = int(end_str)
+            if start < 1 or start > end:
+                raise RuleParseError(f"Invalid page range at Excel row {line_number}: {chunk}")
+            result.extend(range(start, end + 1))
+            continue
+        if not chunk.isdigit() or int(chunk) < 1:
+            raise RuleParseError(f"Invalid page range at Excel row {line_number}: {chunk}")
+        result.append(int(chunk))
+    return result
 
 
 def _load_page_texts(pdf_source: str | Path | Iterable[str]) -> list[str]:

@@ -14,6 +14,7 @@ from pdf_zip_bot import (
     format_rule_preview_table,
     parse_rules_table,
     process_pdf_to_zip,
+    workbook_uses_explicit_pages,
 )
 
 
@@ -213,6 +214,53 @@ class ParseRulesTableTests(unittest.TestCase):
         rules = build_rules_from_workbook(buffer.getvalue(), [])
 
         self.assertEqual([(rule.company_name, rule.reference_code, rule.page_spec) for rule in rules], [("宁波德韵工具有限公司", "919005", "82-116")])
+
+    def test_mixed_page_column_uses_filled_rows_and_sku_matches_the_rest(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["供应商", "SKU", "页数"])
+        sheet.append(["冠日", "80FD6080", None])
+        sheet.append(["溢丰", "81618103N", None])
+        sheet.append(["冠日", "80912451", "4-5"])
+        sheet.append(["仓库发", "80912451", "6"])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        content = buffer.getvalue()
+
+        rules = build_rules_from_workbook(
+            content,
+            [
+                "SKU 80FD6080",
+                "SKU leftover",
+                "SKU 81618103N",
+                "SKU 80912451 also 80FD6080",
+                "SKU 80912451",
+                "SKU 80912451",
+                "SKU leftover",
+            ],
+        )
+
+        self.assertFalse(workbook_uses_explicit_pages(content))
+        self.assertEqual(
+            [(rule.company_name, rule.reference_code, rule.page_spec) for rule in rules],
+            [
+                ("冠日", "80FD6080", "1"),
+                ("溢丰", "81618103N", "3"),
+                ("冠日", "80912451", "4-5"),
+                ("仓库发", "80912451", "6"),
+                ("仓库发", "", "2,7"),
+            ],
+        )
+
+    def test_workbook_uses_explicit_pages_when_every_row_has_pages(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["供应商", "SKU", "拆分页面"])
+        sheet.append(["宁波德韵工具有限公司", "919005", "82-116"])
+        buffer = BytesIO()
+        workbook.save(buffer)
+
+        self.assertTrue(workbook_uses_explicit_pages(buffer.getvalue()))
 
 
 class ProcessPdfToZipTests(unittest.TestCase):
