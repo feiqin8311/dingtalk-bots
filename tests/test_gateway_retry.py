@@ -16,7 +16,7 @@ from dedup_store import TrackStateStore  # noqa: E402
 from dingtalk_table import TableRow  # noqa: E402
 from excel_export import ReportItem  # noqa: E402
 from pingyi_client import TrackEvent, TrackShipment  # noqa: E402
-from runner import _retry_longzhou_query_errors  # noqa: E402
+from runner import _retry_longzhou_query_errors, _retry_yinghe_query_errors  # noqa: E402
 
 
 def _row(*, logistics_no: str, brand: str = "EZARC") -> TableRow:
@@ -124,6 +124,75 @@ class LongzhouRetryTests(unittest.TestCase):
         self.assertEqual(stats["gateway_recovered"], 0)
         self.assertEqual(len(bucket), 1)
         self.assertEqual(bucket[0].event_key, "query_error")
+
+
+class YingheRetryTests(unittest.TestCase):
+    def test_retry_recovers_yinghe_query_error(self):
+        log = logging.getLogger("test_retry")
+        no = "YH260717001"
+        row = TableRow(
+            record_id="r-yh",
+            invoice_no="26YH001",
+            brand="YPLUS",
+            country="美国",
+            carrier="盈和",
+            fba_codes=["FBA1"],
+            logistics_nos=[no],
+            eta_date=None,
+            delivered_at=None,
+            owners=[{"unionId": "u1", "name": "柯鹏翔"}],
+        )
+        bucket = [
+            ReportItem(
+                shipment_key=no,
+                event_key="query_error",
+                message=f"{no} 查询失败",
+                user_ids=["u1"],
+                logistics_no=no,
+                carrier="盈和",
+                detail=f"{no} 查询失败：网关超时",
+            )
+        ]
+        shipment = TrackShipment(
+            reference_no=no,
+            tracking_no=no,
+            destination_country="",
+            track_status="",
+            track_status_name="已入仓",
+            events=[
+                TrackEvent(
+                    occur_date="2026-08-06",
+                    location="",
+                    description="POD 已提供,当地时间【8月4日】已入仓，",
+                    track_code="",
+                    track_status="",
+                    track_status_name="",
+                )
+            ],
+        )
+        gateway = MagicMock()
+        gateway.query_yinghe.return_value = shipment
+
+        with tempfile.TemporaryDirectory() as td:
+            store = TrackStateStore(Path(td) / "t.sqlite3")
+            try:
+                stats = _retry_yinghe_query_errors(
+                    bucket,
+                    [row],
+                    gateway=gateway,
+                    store=store,
+                    logger=log,
+                    pause_sec=0,
+                    platform="yinghe",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(stats["yinghe_retry"], 1)
+        self.assertEqual(stats["yinghe_recovered"], 1)
+        self.assertFalse(any(it.event_key == "query_error" for it in bucket))
+        self.assertTrue(any(it.event_keys for it in bucket))
+        gateway.query_yinghe.assert_called_once_with(no, platform="yinghe")
 
 
 if __name__ == "__main__":

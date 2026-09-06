@@ -55,6 +55,7 @@ class TrackNotifyConfig:
     query_workers: int
     # 是否钉钉推送 Excel；False 时只落盘 exports/（暂时默认关）
     send_excel: bool
+    yinghe_gateway_platform: str = "yinghe"
 
     @property
     def state_db_path(self) -> Path:
@@ -74,10 +75,10 @@ def _parse_carrier_keywords() -> tuple[str, ...]:
     raw = (
         os.getenv("TRACK_CARRIER_KEYWORDS")
         or os.getenv("TRACK_CARRIER_KEYWORD")
-        or "平谊,龙舟,美通,堡森"
+        or "平谊,龙舟,美通,堡森,盈和"
     ).strip()
     parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
-    return tuple(parts) if parts else ("平谊", "龙舟", "美通", "堡森")
+    return tuple(parts) if parts else ("平谊", "龙舟", "美通", "堡森", "盈和")
 
 
 def load_config_from_env() -> TrackNotifyConfig:
@@ -212,4 +213,5 @@ def load_config_from_env() -> TrackNotifyConfig:
         state_dir=state_dir,
         query_workers=query_workers,
         send_excel=send_excel,
+        yinghe_gateway_platform=(os.getenv("YINGHE_GATEWAY_PLATFORM") or "yinghe").strip(),
     )

@@ -109,6 +109,25 @@ class GatewayClientTests(unittest.TestCase):
         self.assertNotIn("logistics_no", captured["body"])
         self.assertEqual(len(shipment.events), 3)
 
+    def test_query_yinghe_sends_logistics_no(self):
+        client = LogisticsGatewayClient("http://example.test", "token")
+        captured: dict = {}
+
+        def fake_urlopen(req, timeout=0):
+            captured["body"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse(SAMPLE_AGL)
+
+        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            shipment = client.query_yinghe("YHE2605211007", platform="yinghe")
+
+        self.assertIsNotNone(shipment)
+        self.assertEqual(captured["body"]["logistics_no"], "YHE2605211007")
+        self.assertEqual(captured["body"]["platform"], "yinghe")
+        self.assertTrue(captured["body"]["include_tracking"])
+        self.assertFalse(captured["body"]["include_order"])
+        self.assertNotIn("fba_code", captured["body"])
+        self.assertEqual(len(shipment.events), 3)
+
     def test_query_fba_missing_logistics_no_is_error(self):
         client = LogisticsGatewayClient("http://example.test", "token")
 

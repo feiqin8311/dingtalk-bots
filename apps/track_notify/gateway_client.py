@@ -25,6 +25,9 @@ def normalize_agl_time(raw: str) -> str:
     # 已是 2026-06-18 之类
     if re.match(r"\d{4}-\d{1,2}-\d{1,2}", text):
         return text.split(" ", 1)[0]
+    m_slash = re.match(r"^(\d{4})/(\d{1,2})/(\d{1,2})", text)
+    if m_slash:
+        return f"{m_slash.group(1)}-{int(m_slash.group(2)):02d}-{int(m_slash.group(3)):02d}"
     return text.split(" ", 1)[0]
 
 
@@ -99,6 +102,24 @@ class LogisticsGatewayClient:
             "include_tracking": True,
         }
         return self._query_fba(payload, fallback_no=fba_code)
+
+    def query_yinghe(
+        self,
+        logistics_no: str,
+        *,
+        platform: str = "yinghe",
+    ) -> TrackShipment | None:
+        """盈和：基于物流编号直查网关。"""
+        logistics_no = (logistics_no or "").strip()
+        if not logistics_no:
+            raise ValueError("logistics_no required")
+        payload: dict[str, Any] = {
+            "logistics_no": logistics_no,
+            "platform": (platform or "yinghe").strip() or "yinghe",
+            "include_order": False,
+            "include_tracking": True,
+        }
+        return self._query_fba(payload, fallback_no=logistics_no)
 
     def _query_fba(
         self, payload: dict[str, Any], *, fallback_no: str

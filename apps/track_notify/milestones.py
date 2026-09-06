@@ -52,6 +52,13 @@ _MEITONG_SEA: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("mt:sea_deliver", ("交付",)),
 )
 
+# 盈和：已入仓 / 已到港 / 已开船
+_YINGHE: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("yh:inbound", ("已入仓",)),
+    ("yh:pod", ("已到港",)),
+    ("yh:sail", ("已开船",)),
+)
+
 
 def meitong_lane(channel: str) -> str | None:
     """卡航 / 海运（含海派）。其它渠道不套美通节点。"""
@@ -86,6 +93,9 @@ _LABELS: dict[str, str] = {
     "mt:sea_depart": "离港",
     "mt:sea_pod": "到港",
     "mt:sea_deliver": "交付",
+    "yh:inbound": "已入仓",
+    "yh:pod": "已到港",
+    "yh:sail": "已开船",
 }
 
 # 无日期节点单独记一笔，补上日期后还能再推（不去覆盖 dated key）
@@ -149,6 +159,12 @@ def match_milestone(
             return None
         desc = _compact(event.description)
         for key, phrases in table:
+            if all(_compact(p) in desc for p in phrases):
+                return key
+        return None
+    if kind == "yinghe":
+        desc = _compact(event.description)
+        for key, phrases in _YINGHE:
             if all(_compact(p) in desc for p in phrases):
                 return key
         return None

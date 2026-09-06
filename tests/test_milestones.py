@@ -214,6 +214,28 @@ class MatchMilestoneTests(unittest.TestCase):
             "lz:fc",
         )
 
+    def test_yinghe_requested_nodes(self):
+        def _yh(desc: str):
+            return match_milestone(_ev(desc), "yinghe")
+
+        self.assertEqual(
+            _yh("POD 已提供,当地时间【8月4日】已入仓，"),
+            "yh:inbound",
+        )
+        self.assertEqual(
+            _yh("当地时间7月29日已到港 船名航次：ZIM EAGLE 21E"),
+            "yh:pod",
+        )
+        self.assertEqual(
+            _yh("7月17日NINGBO已开船,官网显示,预计7月29日到港 船名航次：ZIM EAGLE 21E"),
+            "yh:sail",
+        )
+        self.assertIsNone(_yh("预计7月29日到港 船名航次：ZIM EAGLE 21E"))
+        self.assertIsNone(_yh("已报关完成"))
+        self.assertEqual(milestone_label("yh:inbound"), "已入仓")
+        self.assertEqual(milestone_label("yh:pod"), "已到港")
+        self.assertEqual(milestone_label("yh:sail"), "已开船")
+
     def test_milestone_label_is_chinese_only(self):
         self.assertEqual(milestone_label("lz:ningbo"), "出发地 中国宁波")
         self.assertEqual(milestone_label("lz:pod"), "已到达卸货港")
@@ -619,6 +641,48 @@ class EmitIncrementalTests(unittest.TestCase):
             self.assertEqual(bucket[0].event_keys, ["bs:eta_pod"])
             self.assertEqual(bucket[0].detail, f"2026-06-10 {original}")
             self.assertNotEqual(bucket[0].detail, "2026-06-10 预计到港")
+            store.close()
+
+    def test_yinghe_keeps_original_description(self):
+        logger = logging.getLogger("test_emit")
+        row = TableRow(
+            record_id="r-yh",
+            invoice_no="26YH001",
+            brand="YPLUS",
+            country="美国",
+            carrier="盈和",
+            fba_codes=["FBA19YH01"],
+            logistics_nos=["YH260717001"],
+            eta_date=None,
+            delivered_at=None,
+        )
+        original = "7月17日NINGBO已开船,官网显示,预计7月29日到港 船名航次：ZIM EAGLE 21E"
+        shipment = TrackShipment(
+            reference_no="YH260717001",
+            tracking_no="YH260717001",
+            destination_country="",
+            track_status="",
+            track_status_name="",
+            events=[_ev(original, when="2026-07-17 19:40")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            store = TrackStateStore(Path(tmp) / "s.sqlite3")
+            bucket: list = []
+            n = _emit_events(
+                row=row,
+                shipment=shipment,
+                shipment_key="YH260717001",
+                display_code="YH260717001",
+                kind="yinghe",
+                user_ids=["u1"],
+                store=store,
+                bucket=bucket,
+                logger=logger,
+            )
+            self.assertEqual(n, 1)
+            self.assertEqual(bucket[0].event_keys, ["yh:sail"])
+            self.assertEqual(bucket[0].detail, f"2026-07-17 {original}")
+            self.assertNotEqual(bucket[0].detail, "2026-07-17 已开船")
             store.close()
 
 

@@ -141,6 +141,7 @@ class CarrierKindTests(unittest.TestCase):
         self.assertEqual(_carrier_kind("龙舟AGL"), "longzhou")
         self.assertEqual(_carrier_kind("堡森"), "baosen")
         self.assertEqual(_carrier_kind("美通"), "meitong")
+        self.assertEqual(_carrier_kind("盈和"), "yinghe")
         self.assertEqual(_carrier_kind("其他"), "unknown")
 
     def test_missing_fba_line(self):
@@ -164,6 +165,10 @@ class CarrierKindTests(unittest.TestCase):
         self.assertEqual(
             _missing_key_line(row, kind="meitong"),
             "26LBA22 无物流编号，无法查询美通轨迹",
+        )
+        self.assertEqual(
+            _missing_key_line(row, kind="yinghe"),
+            "26LBA22 无物流编号，无法查询盈和轨迹",
         )
         row.carrier = "堡森"
         self.assertEqual(

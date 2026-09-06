@@ -49,6 +49,8 @@ def _carrier_kind(carrier: str) -> str:
         return "pingyi"
     if "美通" in text:
         return "meitong"
+    if "盈和" in text:
+        return "yinghe"
     return "unknown"
 
 
@@ -169,10 +171,10 @@ def _emit_events(
         when = (event.occur_date or "").strip()
         if " " in when:
             when = when.split(" ", 1)[0]
-        # 美通/堡森写接口原文；平谊/龙舟仍用固定短标签
+        # 美通/堡森/盈和写接口原文；平谊/龙舟仍用固定短标签
         status = (
             (event.description or "").strip() or milestone_label(mkey)
-            if kind in {"meitong", "baosen"}
+            if kind in {"meitong", "baosen", "yinghe"}
             else milestone_label(mkey)
         )
         part = f"{when} {status}".strip() if when else status
@@ -221,6 +223,8 @@ def _missing_key_line(row: TableRow, *, kind: str) -> str:
         return f"{inv} 无FBA编码，无法查询堡森轨迹".strip()
     if kind == "meitong":
         return f"{inv} 无物流编号，无法查询美通轨迹".strip()
+    if kind == "yinghe":
+        return f"{inv} 无物流编号，无法查询盈和轨迹".strip()
     return f"{inv} 无物流编号，无法查询龙舟轨迹".strip()
 
 
@@ -1147,6 +1151,238 @@ def _retry_pingyi_query_errors(
     return stats
 
 
+def _process_yinghe_row(
+    row: TableRow,
+    *,
+    client: LogisticsGatewayClient | None,
+    store: TrackStateStore,
+    bucket: list[ReportItem],
+    logger: logging.Logger,
+    platform: str = "yinghe",
+) -> tuple[int, bool, list[str]]:
+    if client is None:
+        line = _query_fail_line(
+            row, ",".join(row.logistics_nos) or row.invoice_no, "网关未配置"
+        )
+        logger.error(
+            "skip yinghe record=%s: gateway not configured (LOGISTICS_GATEWAY_*)",
+            row.record_id,
+        )
+        n = _collect_once(
+            shipment_key=row.record_id,
+            event_key="gateway_missing",
+            message=line,
+            user_ids=notify_user_ids(row.owners, issue=True),
+            store=store,
+            bucket=bucket,
+            row=row,
+            fba_code=",".join(row.fba_codes),
+            logistics_no=",".join(row.logistics_nos),
+            detail=line,
+            logger=logger,
+        )
+        return n, False, [line]
+
+    nos = row.logistics_nos
+    if not nos:
+        return _report_missing_key(
+            row, kind="yinghe", store=store, bucket=bucket, logger=logger
+        )
+
+    ok_uids = notify_user_ids(row.owners, issue=False)
+    issue_uids = notify_user_ids(row.owners, issue=True)
+    fba_joined = ",".join(row.fba_codes)
+    notified = 0
+    query_ok = True
+    issues: list[str] = []
+    for logistics_no in nos:
+        try:
+            shipment = client.query_yinghe(logistics_no, platform=platform)
+        except Exception as exc:
+            query_ok = False
+            line = _query_fail_line(row, logistics_no, str(exc))
+            issues.append(line)
+            logger.exception(
+                "gateway yinghe failed logistics_no=%s: %s",
+                logistics_no,
+                exc,
+            )
+            notified += _collect_once(
+                shipment_key=logistics_no,
+                event_key="query_error",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=fba_joined,
+                logistics_no=logistics_no,
+                detail=line,
+                logger=logger,
+            )
+            continue
+        if shipment is None:
+            line = _no_track_line(row, logistics_no)
+            issues.append(line)
+            logger.warning(
+                "no track logistics_no=%s record=%s",
+                logistics_no,
+                row.record_id,
+            )
+            notified += _collect_once(
+                shipment_key=logistics_no,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=fba_joined,
+                logistics_no=logistics_no,
+                detail=line,
+                logger=logger,
+            )
+            continue
+        dropped = _drop_transient_issues(bucket, logistics_no)
+        if dropped:
+            logger.info(
+                "drop stale yinghe issues logistics_no=%s count=%s (query recovered)",
+                logistics_no,
+                dropped,
+            )
+        logger.info(
+            "track record=%s logistics_no=%s events=%s latest=%s",
+            row.record_id,
+            logistics_no,
+            len(shipment.events),
+            shipment.track_status_name,
+        )
+        notified += _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=logistics_no,
+            display_code=logistics_no,
+            kind="yinghe",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return notified, query_ok, issues
+
+
+def _retry_yinghe_query_errors(
+    bucket: list[ReportItem],
+    rows: list[TableRow],
+    *,
+    gateway: LogisticsGatewayClient | None,
+    store: TrackStateStore,
+    logger: logging.Logger,
+    pause_sec: float = 1.0,
+    platform: str = "yinghe",
+) -> dict[str, int]:
+    """本轮全部查完后：对盈和 query_error 再串行重查 1 次（网关瞬时失败）。"""
+    stats = {"yinghe_retry": 0, "yinghe_recovered": 0}
+    if gateway is None:
+        return stats
+
+    by_no: dict[str, TableRow] = {}
+    for row in rows:
+        if _carrier_kind(row.carrier) != "yinghe":
+            continue
+        for no in row.logistics_nos:
+            key = (no or "").strip()
+            if key:
+                by_no[key] = row
+
+    targets: list[tuple[TableRow, str]] = []
+    seen_no: set[str] = set()
+    for it in bucket:
+        if it.event_key != "query_error":
+            continue
+        no = (it.logistics_no or it.shipment_key or "").strip()
+        if not no or no not in by_no or no in seen_no:
+            continue
+        seen_no.add(no)
+        targets.append((by_no[no], no))
+
+    if not targets:
+        return stats
+
+    logger.info(
+        "yinghe retry pass count=%s pause=%ss (serial)",
+        len(targets),
+        pause_sec,
+    )
+    stats["yinghe_retry"] = len(targets)
+
+    for i, (row, logistics_no) in enumerate(targets):
+        if i > 0 and pause_sec > 0:
+            time.sleep(pause_sec)
+        fba_joined = ",".join(row.fba_codes)
+        ok_uids = notify_user_ids(row.owners, issue=False)
+        issue_uids = notify_user_ids(row.owners, issue=True)
+        try:
+            shipment = gateway.query_yinghe(logistics_no, platform=platform)
+        except Exception as exc:
+            logger.warning(
+                "yinghe retry still failed logistics_no=%s: %s",
+                logistics_no,
+                exc,
+            )
+            continue
+
+        bucket[:] = [
+            it
+            for it in bucket
+            if not (
+                it.event_key == "query_error" and it.shipment_key == logistics_no
+            )
+        ]
+        stats["yinghe_recovered"] += 1
+
+        if shipment is None:
+            line = _no_track_line(row, logistics_no)
+            logger.info(
+                "yinghe retry no track logistics_no=%s record=%s",
+                logistics_no,
+                row.record_id,
+            )
+            _collect_once(
+                shipment_key=logistics_no,
+                event_key="no_track",
+                message=line,
+                user_ids=issue_uids,
+                store=store,
+                bucket=bucket,
+                row=row,
+                fba_code=fba_joined,
+                logistics_no=logistics_no,
+                detail=line,
+                logger=logger,
+            )
+            continue
+
+        logger.info(
+            "yinghe retry ok logistics_no=%s events=%s latest=%s",
+            logistics_no,
+            len(shipment.events),
+            shipment.track_status_name,
+        )
+        _emit_events(
+            row=row,
+            shipment=shipment,
+            shipment_key=logistics_no,
+            display_code=logistics_no,
+            kind="yinghe",
+            user_ids=ok_uids,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+        )
+    return stats
+
+
 def _process_row(
     row: TableRow,
     *,
@@ -1156,6 +1392,7 @@ def _process_row(
     store: TrackStateStore,
     bucket: list[ReportItem],
     logger: logging.Logger,
+    yinghe_platform: str = "yinghe",
 ) -> tuple[int, bool, list[str]]:
     if not row.record_id:
         return 0, False, []
@@ -1187,6 +1424,15 @@ def _process_row(
             return 0, False, [line]
         return _process_meitong_row(
             row, client=meitong, store=store, bucket=bucket, logger=logger
+        )
+    if kind == "yinghe":
+        return _process_yinghe_row(
+            row,
+            client=gateway,
+            store=store,
+            bucket=bucket,
+            logger=logger,
+            platform=yinghe_platform,
         )
     logger.warning(
         "skip unknown carrier=%s record=%s invoice=%s",
@@ -1481,6 +1727,7 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                 store=store,
                 bucket=local,
                 logger=logger,
+                yinghe_platform=config.yinghe_gateway_platform,
             )
             return row, collected, query_ok, issues, local
 
@@ -1492,7 +1739,7 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                 kind = _carrier_kind(row.carrier)
                 if kind in {"pingyi", "baosen"} and not row.fba_codes:
                     stats["missing_key"] += 1
-                elif kind in {"longzhou", "meitong"} and not row.logistics_nos:
+                elif kind in {"longzhou", "meitong", "yinghe"} and not row.logistics_nos:
                     stats["missing_key"] += 1
                 stats["processed"] += 1
                 stats["collected"] += collected
@@ -1534,6 +1781,16 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             pause_sec=3.0,
         )
         stats.update(baosen_retry)
+        yh_retry = _retry_yinghe_query_errors(
+            bucket,
+            pending,
+            gateway=gateway,
+            store=store,
+            logger=logger,
+            pause_sec=1.0,
+            platform=config.yinghe_gateway_platform,
+        )
+        stats.update(yh_retry)
         py_retry = _retry_pingyi_query_errors(
             bucket,
             pending,
@@ -1555,6 +1812,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
         # 重试后问题行可能变少，issue 摘要以 bucket 为准
         if (
             retry_stats.get("gateway_recovered")
+            or baosen_retry.get("baosen_recovered")
+            or yh_retry.get("yinghe_recovered")
             or py_retry.get("pingyi_recovered")
             or mt_retry.get("meitong_recovered")
         ):
