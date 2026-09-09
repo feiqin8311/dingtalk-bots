@@ -11,6 +11,8 @@ from openpyxl.styles import Alignment
 
 # 物流详情行：以 YYYY-MM-DD 开头视为「有日期」
 _DETAIL_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}\b")
+# 盈和「物流状态」只出这几个关键词（详情仍保留接口原文）
+_YINGHE_STATUS_KEYWORDS = ("已入仓", "已到港", "已开船")
 
 
 # 业务回传列（按产品要求）
@@ -57,6 +59,8 @@ class ReportItem:
     def excel_row(self) -> list[str]:
         text = self.detail or self.message
         status, occur_at = split_detail_columns(text)
+        if "盈和" in (self.carrier or ""):
+            status = _yinghe_status_column(status)
         return [
             self.invoice_no,
             self.brand,
@@ -97,6 +101,20 @@ def split_detail_columns(text: str) -> tuple[str, str]:
             times.append("")
             statuses.append(line)
     return "\n".join(statuses), "\n".join(times)
+
+
+def _yinghe_status_keyword(line: str) -> str:
+    text = line or ""
+    for kw in _YINGHE_STATUS_KEYWORDS:
+        if kw in text:
+            return kw
+    return text
+
+
+def _yinghe_status_column(status: str) -> str:
+    if not status:
+        return status
+    return "\n".join(_yinghe_status_keyword(line) for line in status.splitlines())
 
 
 _ISSUE_KEYS = frozenset(

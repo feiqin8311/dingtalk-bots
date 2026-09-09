@@ -159,6 +159,34 @@ class ExcelExportTests(unittest.TestCase):
             self.assertTrue(ws["L2"].alignment.wrap_text)
             self.assertTrue(ws["M2"].alignment.wrap_text)
 
+    def test_yinghe_status_is_keyword_only(self):
+        detail = (
+            "2026-08-26 8月26日SHANGHAI已开船,官网显示,预计9月6日到港 "
+            "船名航次：MATSON WAIKIKI 027E\n"
+            "2026-09-06 当地时间9月6日已到港 船名航次：MATSON WAIKIKI 027E"
+        )
+        item = ReportItem(
+            shipment_key="26EBA40",
+            event_key="yh:sail",
+            message="26EBA40 节点2条",
+            user_ids=["u1"],
+            invoice_no="26EBA40",
+            brand="EZARC",
+            country="美国",
+            fba_code="IBR5768169334949515270",
+            logistics_no="26EBA40",
+            carrier="盈和",
+            shipped_at="2026-08-15",
+            eta_date="2026-08-20",
+            owners="乔丹-Joyce",
+            detail=detail,
+            event_keys=["yh:sail", "yh:pod"],
+        )
+        row = item.excel_row()
+        self.assertEqual(row[10], detail)
+        self.assertEqual(row[11], "已开船\n已到港")
+        self.assertEqual(row[12], "2026-08-26\n2026-09-06")
+
     def test_split_detail_columns(self):
         self.assertEqual(
             split_detail_columns("2026-07-01 离港\n2026-07-10 清关"),
