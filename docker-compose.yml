@@ -38,9 +38,9 @@ services:
       https_proxy: ""
       NO_PROXY: ""
       no_proxy: ""
-      # 同步文件统一目录：宿主机 ./files → 容器 /app/files
-      ADDRESS_BOOK_XLSX_PATH: /app/files/全站点地址.xlsx
-      PINXIANG_PRODUCT_INFO_PATH: /app/files/产品信息单证专用.xlsx
+      # 业务 Excel：.env 可指 smb:// 共享盘；未设时用挂载的 files/
+      ADDRESS_BOOK_XLSX_PATH: "${ADDRESS_BOOK_XLSX_PATH:-/app/files/全站点地址.xlsx}"
+      PINXIANG_PRODUCT_INFO_PATH: "${PINXIANG_PRODUCT_INFO_PATH:-/app/files/产品信息单证专用.xlsx}"
       PINXIANG_WORKSPACE: /app/apps/pinxiang_bot/.bot-workspace
       LCL_BASE_DIR: /app/apps/lcl_bot
       TRACK_NOTIFY_STATE_DIR: /app/apps/track_notify/.state
@@ -78,7 +78,7 @@ services:
         required: false
     environment:
       TZ: Asia/Shanghai
-      ADDRESS_BOOK_XLSX_PATH: /app/files/全站点地址.xlsx
+      ADDRESS_BOOK_XLSX_PATH: "${ADDRESS_BOOK_XLSX_PATH:-/app/files/全站点地址.xlsx}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

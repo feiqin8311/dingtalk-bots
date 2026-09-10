@@ -38,7 +38,7 @@ from packing import (  # noqa: E402
     process_shipment_file,
     write_packing_workbook,
 )
-from product_info_source import load_product_specs  # noqa: E402
+from product_info_source import _is_smb_path, load_product_specs  # noqa: E402
 from runtime import (  # noqa: E402
     MessageDeduplicator,
     collect_download_codes,
@@ -1345,12 +1345,11 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
         path = (pinxiang_config.PRODUCT_INFO_PATH or "").strip()
         if not path:
             return {}
-        if not path.lower().startswith("smb://") and not path.startswith("\\\\") and not path.startswith("//"):
-            if not Path(path).is_file():
-                self.logger.warning("product info file missing, fallback to shipment pack fields: %s", path)
-                return {}
+        if not _is_smb_path(path) and not Path(path).is_file():
+            self.logger.warning("product info file missing, fallback to shipment pack fields: %s", path)
+            return {}
         try:
-            return load_product_specs(
+            specs = load_product_specs(
                 path,
                 smb_username=pinxiang_config.SMB_USERNAME,
                 smb_password=pinxiang_config.SMB_PASSWORD,
@@ -1358,6 +1357,8 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
                 smb_timeout_sec=pinxiang_config.SMB_TIMEOUT_SEC,
                 smb_client_name=pinxiang_config.SMB_CLIENT_NAME,
             )
+            self.logger.info("product info loaded path=%s skus=%s", path, len(specs))
+            return specs
         except Exception as exc:
             self.logger.warning("load product info failed, fallback to shipment pack fields: %s", exc)
             return {}
