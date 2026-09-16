@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "apps") not in sys.path:
+    sys.path.insert(0, str(ROOT / "apps"))
+
+from lcl_bot.processor import PackingBoxProcessor  # noqa: E402
+
+
+class LclPackMergeTest(unittest.TestCase):
+    def test_same_sku_across_shipments_is_not_duplicated(self):
+        invoice = pd.DataFrame(
+            {
+                "发货单号": ["SP1", None, "SP2"],
+                "SKU": [801801, 801612, 801801],
+                "发货数量": [120, 240, 1000],
+            }
+        )
+        invoice["发货单号"] = invoice["发货单号"].ffill()
+        pack = pd.DataFrame(
+            {
+                "发货单号": ["SP1", None, "SP2"],
+                "SKU": [801801, 801612, 801801],
+                "总重量（kg）-箱子": [13.5, 16.8, 94.5],
+                "总体积（m³）-箱子": [0.03, 0.02, 0.20],
+                "箱子毛重（kg）": [13.5, 16.8, 13.5],
+                "单箱数量": [160, 120, 160],
+                "箱子长度（cm）": [38, 30, 38],
+                "箱子宽度（cm）": [30, 25, 30],
+                "箱子高度（cm）": [25, 20, 25],
+            }
+        )
+
+        merged = PackingBoxProcessor._merge_invoice_with_pack_info(invoice, pack)
+
+        self.assertEqual(len(merged), 3)
+        sku_rows = merged[merged["SKU"] == 801801]
+        self.assertEqual(len(sku_rows), 2)
+        self.assertCountEqual(sku_rows["发货单号"].tolist(), ["SP1", "SP2"])
+        self.assertCountEqual(sku_rows["发货数量"].tolist(), [120, 1000])
+
+    def test_load_keeps_one_row_per_warehouse_for_shared_sku(self):
+        invoice = pd.DataFrame(
+            {
+                "发货单号": ["SP260916040", None, "SP260916039"],
+                "发货仓库（单据）": ["青山湖仓库", None, "良品仓"],
+                "品名": ["3pc地毯割刀OMT", "other", "3pc地毯割刀OMT"],
+                "SKU": [801801, 801612, 801801],
+                "包装规格": ["13.50x1.00x8.50", "16.00x11.80x3.00", "13.50x1.00x8.50"],
+                "单品毛重": [80.0, 140.0, 80.0],
+                "发货量": [120, 240, 1000],
+            }
+        )
+        pack = pd.DataFrame(
+            {
+                "发货单号": ["SP260916040", None, "SP260916039"],
+                "SKU": [801801, 801612, 801801],
+                "发货数量": [120, 240, 1000],
+                "单箱数量": [160, 120, 160],
+                "箱子毛重（kg）": [13.5, 16.8, 13.5],
+                "箱子长度（cm）": [38, 30, 38],
+                "箱子宽度（cm）": [30, 25, 30],
+                "箱子高度（cm）": [25, 20, 25],
+                "CBM（m³）-箱子": [0.03, 0.02, 0.20],
+                "总重量（kg）-箱子": [13.5, 16.8, 94.5],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "shipment.xlsx"
+            with pd.ExcelWriter(path) as writer:
+                invoice.to_excel(writer, sheet_name="发货单详情", index=False)
+                pack.to_excel(writer, sheet_name="装箱信息", index=False)
+
+            processor = PackingBoxProcessor(str(path), str(Path(tmp) / "out.xlsx"))
+            loaded = processor._load_and_preprocess_data()
+
+        sku_rows = loaded[loaded["SKU"].astype(str) == "801801"]
+        self.assertEqual(len(sku_rows), 2)
+        self.assertCountEqual(sku_rows["发货仓库（单据）"].tolist(), ["青山湖仓库", "良品仓"])
+        self.assertCountEqual(sku_rows["发货数量"].tolist(), [120, 1000])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1034,6 +1034,28 @@ class PackingBoxProcessor:
         
         return merge_summary
 
+    @staticmethod
+    def _merge_invoice_with_pack_info(invoice_df, pack_info_df):
+        """按发货单号+SKU对齐装箱信息，避免同SKU跨仓笛卡尔积。"""
+        pack_cols = [
+            "SKU",
+            "总重量（kg）-箱子",
+            "总体积（m³）-箱子",
+            "箱子毛重（kg）",
+            "单箱数量",
+            "箱子长度（cm）",
+            "箱子宽度（cm）",
+            "箱子高度（cm）",
+        ]
+        merge_keys = ["SKU"]
+        if "发货单号" in invoice_df.columns and "发货单号" in pack_info_df.columns:
+            pack_info_df = pack_info_df.copy()
+            pack_info_df["发货单号"] = pack_info_df["发货单号"].ffill()
+            if invoice_df["发货单号"].notna().any() and pack_info_df["发货单号"].notna().any():
+                pack_cols = ["发货单号", *pack_cols]
+                merge_keys = ["发货单号", "SKU"]
+        return invoice_df.merge(pack_info_df[pack_cols], on=merge_keys, how="left")
+
     def _load_and_preprocess_data(self):
         """加载并预处理数据"""
         # 读取发货单详情
@@ -1041,6 +1063,8 @@ class PackingBoxProcessor:
         if "发货仓库（单据）" in invoice_df.columns:
             # 合并单元格向下填充
             invoice_df["发货仓库（单据）"] = invoice_df["发货仓库（单据）"].ffill()
+        if "发货单号" in invoice_df.columns:
+            invoice_df["发货单号"] = invoice_df["发货单号"].ffill()
         
         # 新增列
         invoice_df["备注"] = ""
@@ -1066,8 +1090,7 @@ class PackingBoxProcessor:
                 pack_info_df = pack_info_df.drop(columns=['总体积（m³）-箱子'])
             pack_info_df.rename(columns={'CBM（m³）-箱子': '总体积（m³）-箱子'}, inplace=True)
             
-        pack_info_df = pack_info_df[['SKU','总重量（kg）-箱子','总体积（m³）-箱子','箱子毛重（kg）', '单箱数量', '箱子长度（cm）', '箱子宽度（cm）', '箱子高度（cm）']]
-        invoice_df = invoice_df.merge(pack_info_df, on='SKU', how='left')
+        invoice_df = self._merge_invoice_with_pack_info(invoice_df, pack_info_df)
         # 重新计算箱数
         invoice_df['箱数'] = invoice_df['发货数量'] / invoice_df['单箱数量']
         invoice_df = self._apply_non_integer_large_box_repacking(invoice_df)
