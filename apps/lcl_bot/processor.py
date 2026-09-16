@@ -764,12 +764,13 @@ class PackingBoxProcessor:
         first_group['SKU'] = first_group['SKU'].apply(self._normalize_sku_value)
         merge_summary_converted['SKU'] = merge_summary_converted['SKU'].apply(self._normalize_sku_value)
         
-        # 合并数据并准备展开
+        # 合并数据并准备展开（同SKU跨仓会多行，展开后按SKU收回一行）
         first_group_merged = first_group.merge(merge_summary_converted, on='SKU', how='left')
         result_df = first_group_merged[['SKU','小组名称','单份数量','_actual_box_count']].copy()
         
         # 数据展开和转换
         result_df_expanded = self._expand_columns_by_group(result_df)
+        result_df_expanded = self._collapse_sku_box_columns(result_df_expanded, first_group)
         specification_df = first_group_merged[['小组名称','_actual_box_count','单箱重量','单箱理论宽','单箱理论长','单箱理论高']].copy()
         specification_df['单箱重量'] = specification_df['单箱重量'].round(2)
         specification_df['单箱理论宽'] = specification_df['单箱理论宽'].round(2)
@@ -785,7 +786,8 @@ class PackingBoxProcessor:
         self._update_amazon_box_headers(ws, start_col, total_box_count)
         self._update_amazon_total_box_count(ws, total_box_count)
         self._update_amazon_packed_quantity(ws)
-        self._clear_amazon_dynamic_box_area(ws, start_col, 6, nan_index + 4)
+        last_sku_row = 5 + int(nan_index)
+        self._clear_amazon_dynamic_box_area(ws, start_col, 6, last_sku_row)
         
         # 插入数据
         columns_to_insert = [col for col in result_df_expanded.columns if col not in ['SKU', '小组名称']]
@@ -794,12 +796,12 @@ class PackingBoxProcessor:
                 self._write_cell_value(ws, 6 + row_idx, start_col + col_idx, row_data[col_name])
         print(f"✅ 已插入 {len(result_df_expanded)} 行数据到M6")
         
-        spec_start_row = nan_index + 8
-        self._clear_amazon_spec_area(ws, start_col, spec_start_row, len(specification_transposed))
+        spec_rows = self._amazon_spec_rows(ws)
+        self._clear_amazon_spec_area(ws, start_col, spec_rows[0], len(specification_transposed))
         for row_idx, (_, row_data) in enumerate(specification_transposed.iterrows()):
             for col_idx, value in enumerate(row_data):
-                self._write_cell_value(ws, spec_start_row + row_idx, start_col + col_idx, value)
-        print(f"✅ 已插入 {len(specification_transposed)} 行specification数据到M{spec_start_row}")
+                self._write_cell_value(ws, spec_rows[row_idx], start_col + col_idx, value)
+        print(f"✅ 已插入 {len(specification_transposed)} 行specification数据到M{spec_rows[0]}")
         
         wb.save(amazon_packaging_file_path)
         print(f"✅ 数据已成功插入并保存到：{amazon_packaging_file_path}")
@@ -820,12 +822,29 @@ class PackingBoxProcessor:
         """更新包装箱总数单元格。"""
         self._write_cell_value(ws, 3, 13, total_box_count)
 
+    def _find_amazon_packaging_label_row(self, ws, prefix: str):
+        for row in range(1, (ws.max_row or 1) + 1):
+            value = ws.cell(row, 1).value
+            if value is not None and str(value).strip().startswith(prefix):
+                return row
+        return None
+
+    def _amazon_spec_rows(self, ws):
+        """重量/宽/长/高所在行；找不到时回退到名称行下一行起连续4行。"""
+        labels = ("包装箱重量", "包装箱宽度", "包装箱长度", "包装箱高度")
+        found = [self._find_amazon_packaging_label_row(ws, label) for label in labels]
+        if all(found):
+            return found  # type: ignore[return-value]
+        name_row = self._find_amazon_packaging_label_row(ws, "包装箱名称") or 17
+        return [name_row + 1, name_row + 2, name_row + 3, name_row + 4]
+
     def _update_amazon_box_headers(self, ws, start_col, total_box_count):
         """更新箱数量列标题和包装箱名称行。"""
+        name_row = self._find_amazon_packaging_label_row(ws, "包装箱名称") or 17
         for idx in range(total_box_count):
             col = start_col + idx
             self._write_cell_value(ws, 5, col, f"包装箱 {idx + 1} 数量")
-            self._write_cell_value(ws, 17, col, f"P1 - B{idx + 1}")
+            self._write_cell_value(ws, name_row, col, f"P1 - B{idx + 1}")
 
     def _update_amazon_packed_quantity(self, ws):
         """将装箱数量列补齐为预计数量，保持与正确模板一致。"""
@@ -835,6 +854,8 @@ class PackingBoxProcessor:
             if sku_value in (None, ""):
                 row += 1
                 continue
+            if str(sku_value).strip().startswith("包装箱"):
+                break
             expected_quantity = ws.cell(row=row, column=10).value
             self._write_cell_value(ws, row, 11, expected_quantity)
             row += 1
@@ -879,6 +900,23 @@ class PackingBoxProcessor:
         total_columns = len([col for col in result_df.columns if col not in ['SKU', '小组名称']])
         print(f"✅ 列展开完成，{len(unique_groups)}个小组 × {total_columns}列")
         return result_df
+
+    @staticmethod
+    def _collapse_sku_box_columns(expanded_df, amazon_skus):
+        """同SKU多仓多行收成一行，箱列取第一个非空值；顺序跟亚马逊表。"""
+        if expanded_df.empty:
+            return expanded_df
+        box_cols = [c for c in expanded_df.columns if c not in ["SKU", "小组名称"]]
+        collapsed_rows = []
+        for sku, part in expanded_df.groupby("SKU", sort=False):
+            row = {"SKU": sku}
+            for col in box_cols:
+                values = [v for v in part[col].tolist() if v not in ("", None) and pd.notna(v)]
+                row[col] = values[0] if values else ""
+            collapsed_rows.append(row)
+        collapsed = pd.DataFrame(collapsed_rows)
+        ordered = amazon_skus[["SKU"]].merge(collapsed, on="SKU", how="left")
+        return ordered
     
     def _transpose_specification(self, df):
         """将specification列转行并按小组展开"""

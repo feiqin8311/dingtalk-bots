@@ -87,6 +87,23 @@ class LclPackMergeTest(unittest.TestCase):
         self.assertCountEqual(sku_rows["发货仓库（单据）"].tolist(), ["青山湖仓库", "良品仓"])
         self.assertCountEqual(sku_rows["发货数量"].tolist(), [120, 1000])
 
+    def test_collapse_keeps_same_sku_from_two_groups(self):
+        expanded = pd.DataFrame(
+            {
+                "SKU": ["801801", "801801", "801612"],
+                "小组名称": ["良品仓-第1组", "青山湖仓库-第2组", "良品仓-第3组"],
+                "良品仓-第1组单份数量1": [125, "", ""],
+                "青山湖仓库-第2组单份数量1": ["", 24, ""],
+                "良品仓-第3组单份数量1": ["", "", 48],
+            }
+        )
+        amazon = pd.DataFrame({"SKU": ["801801", "801612"]})
+        out = PackingBoxProcessor._collapse_sku_box_columns(expanded, amazon)
+        self.assertEqual(list(out["SKU"]), ["801801", "801612"])
+        self.assertEqual(out.loc[0, "良品仓-第1组单份数量1"], 125)
+        self.assertEqual(out.loc[0, "青山湖仓库-第2组单份数量1"], 24)
+        self.assertEqual(out.loc[1, "良品仓-第3组单份数量1"], 48)
+
 
 if __name__ == "__main__":
     unittest.main()
