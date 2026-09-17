@@ -609,7 +609,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         required_columns = [
             'SKU',
             '发货数量',
-            '箱数',
             '单份数量',
             '小组名称',
             '单箱重量',
@@ -631,7 +630,11 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         if merge_summary.empty:
             raise ValueError("拼箱计算结果中没有可用的SKU行")
 
-        numeric_columns = ['发货数量', '箱数', '单份数量', '单箱重量', '单箱理论长', '单箱理论宽', '单箱理论高']
+        numeric_columns = ['发货数量', '单份数量', '单箱重量', '单箱理论长', '单箱理论宽', '单箱理论高']
+        if '箱数' in merge_summary.columns:
+            numeric_columns.append('箱数')
+        if '实际箱数' in merge_summary.columns:
+            numeric_columns.append('实际箱数')
         invalid_columns = []
         for col in numeric_columns:
             converted = pd.to_numeric(merge_summary[col], errors='coerce')
