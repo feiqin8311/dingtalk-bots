@@ -704,13 +704,26 @@ class PackingBoxProcessor:
     def _get_output_columns(self, include_warehouse=False):
         """获取拼箱结果表输出列顺序。"""
         output_columns = [
-            'SKU', '品名', '发货数量', '箱数', '单品毛重（g）', '箱子毛重（kg）', '单品长（cm）', '单品宽（cm）', '单品高（cm）',
-            '是否拼箱', '备注', '单份数量', '单份总重量', '小组名称', '实际箱数', '单箱重量', '重量差', '单品体积', '单份体积',
-            '单箱体积', '单箱理论长', '单箱理论宽', '单箱理论高',
+            'SKU', '发货数量', '是否拼箱', '单份数量', '小组名称', '实际箱数',
+            '单箱重量', '单箱理论长', '单箱理论宽', '单箱理论高',
         ]
         if include_warehouse:
             output_columns.insert(1, "发货仓库（单据）")
         return output_columns
+
+    def _floor_non_integer_share_quantities(self, invoice_df):
+        """5份制拼箱：单份数量非整数则向下取整，发货数量改为单份数量×份数。"""
+        share_n = self.boxes_per_share
+        mask = invoice_df["是否拼箱"].eq("拼箱")
+        if "_force_packing" in invoice_df.columns:
+            mask &= ~invoice_df["_force_packing"].fillna(False).astype(bool)
+        qty = pd.to_numeric(invoice_df["发货数量"], errors="coerce")
+        share = qty / share_n
+        floored = np.floor(share + 1e-9)
+        need = mask & qty.notna() & (floored >= 1) & ((share - floored).abs() > 1e-6)
+        if need.any():
+            invoice_df.loc[need, "发货数量"] = floored[need] * share_n
+        return invoice_df
 
     def _determine_units_per_box_for_packing(self, row):
         """确定拼箱分组时每份应使用的数量。"""
@@ -752,7 +765,14 @@ class PackingBoxProcessor:
         first_group = package_df.iloc[:nan_index][['SKU']]
         
         # 转换单位
-        merge_summary_converted = merge_summary[['SKU','发货数量','小组名称','单份数量','箱数','单箱重量','单箱理论宽','单箱理论长','单箱理论高']].copy()
+        keep_cols = [
+            col for col in (
+                'SKU', '发货数量', '小组名称', '单份数量', '箱数', '实际箱数',
+                '单箱重量', '单箱理论宽', '单箱理论长', '单箱理论高',
+            )
+            if col in merge_summary.columns
+        ]
+        merge_summary_converted = merge_summary[keep_cols].copy()
         merge_summary_converted['_actual_box_count'] = merge_summary_converted.apply(self._infer_actual_box_count, axis=1)
         for col, factor in [('单箱重量', UnitConverter.G_TO_LB), 
                            ('单箱理论宽', UnitConverter.CM_TO_INCH), 
@@ -996,7 +1016,8 @@ class PackingBoxProcessor:
             else:
                 # 单独装箱或拆箱单独装：填入数据
                 ws.cell(row=data_row, column=5, value=row.get('单份数量', '')).border = StyleManager.THIN_BORDER
-                ws.cell(row=data_row, column=6, value=row.get('箱数', '')).border = StyleManager.THIN_BORDER
+                box_count = row.get('实际箱数', row.get('箱数', ''))
+                ws.cell(row=data_row, column=6, value=box_count).border = StyleManager.THIN_BORDER
 
                 # 尺寸和重量（转换单位）
                 dimensions = [
@@ -1055,11 +1076,6 @@ class PackingBoxProcessor:
             else:
                 merge_summary = self._process_no_packing_data(invoice_df)
         
-        # 整理输出列
-        if "重量差" not in merge_summary.columns:
-            merge_summary["重量差"] = ""
-        if "品名" not in merge_summary.columns:
-            merge_summary["品名"] = ""
         merge_summary = self._add_actual_box_count_column(merge_summary)
         output_columns = self._get_output_columns(include_warehouse="发货仓库（单据）" in merge_summary.columns)
         merge_summary = merge_summary[output_columns]
@@ -1135,6 +1151,7 @@ class PackingBoxProcessor:
         
         invoice_df = self._split_box_rows(invoice_df)
         invoice_df['是否拼箱'] = invoice_df.apply(self._determine_packing_status, axis=1)
+        invoice_df = self._floor_non_integer_share_quantities(invoice_df)
 
         base_columns = [
             'SKU', '品名', '发货数量', '箱数', '单品毛重（g）', '箱子毛重（kg）', '单品长（cm）', '单品宽（cm）', '单品高（cm）',
