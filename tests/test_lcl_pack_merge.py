@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook, load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "apps") not in sys.path:
@@ -164,6 +165,89 @@ class LclPackMergeTest(unittest.TestCase):
             "单箱体积",
         }
         self.assertTrue(dropped.isdisjoint(cols))
+
+    def test_resolve_amazon_packaging_sheet_english_and_chinese(self):
+        self.assertEqual(
+            PackingBoxProcessor.resolve_amazon_packaging_sheet(
+                ["Instructions", "Box packing information", "Metadata"]
+            ),
+            "Box packing information",
+        )
+        self.assertEqual(
+            PackingBoxProcessor.resolve_amazon_packaging_sheet(["包装箱包装信息"]),
+            "包装箱包装信息",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            PackingBoxProcessor.resolve_amazon_packaging_sheet(["Instructions", "Metadata"])
+        self.assertIn("Box packing information", str(ctx.exception))
+
+    def test_insert_amazon_packaging_english_sheet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            amazon_path = Path(tmp) / "en.xlsx"
+            _write_sta_packaging_stub(
+                amazon_path,
+                sheet_name="Box packing information",
+                skus=[("804016", 700), ("804020", 400)],
+                labels=("Name of box", "Box weight (lb):", "Box width (inch):", "Box length (inch):", "Box height (inch):"),
+            )
+            merge = pd.DataFrame(
+                {
+                    "SKU": ["804020", "804016"],
+                    "发货数量": [400, 700],
+                    "单份数量": [80, 100],
+                    "小组名称": ["杭州虚拟仓-第1组", "杭州虚拟仓-第3组"],
+                    "实际箱数": [5, 7],
+                    "单箱重量": [17975.0, 12640.0],
+                    "单箱理论长": [32.0, 29.0],
+                    "单箱理论宽": [25.0, 38.0],
+                    "单箱理论高": [54.94, 31.0],
+                }
+            )
+            processor = PackingBoxProcessor("in.xlsx", "out.xlsx")
+            processor.insert_data_to_amazon_packaging(str(amazon_path), merge)
+
+            wb = load_workbook(amazon_path, data_only=True)
+            ws = wb["Box packing information"]
+            self.assertEqual(ws.cell(5, 13).value, "Box 1 quantity")
+            self.assertEqual(ws.cell(9, 13).value, "P1 - B1")
+            self.assertIsNotNone(ws.cell(10, 13).value)
+            self.assertEqual(ws.cell(6, 11).value, 700)
+            # 第1组 5 箱在前，第3组 7 箱在后；804016 应写在 M+5 起
+            self.assertEqual(ws.cell(6, 18).value, 100)
+            self.assertEqual(ws.cell(7, 13).value, 80)
+            wb.close()
+
+
+def _write_sta_packaging_stub(path: Path, *, sheet_name: str, skus: list[tuple[str, int]], labels: tuple[str, ...]) -> None:
+    wb = Workbook()
+    wb.active.title = "Instructions"
+    ws = wb.create_sheet(sheet_name)
+    ws["A3"] = "Total SKUs"
+    ws["I3"] = "Total box count:"
+    ws["M3"] = 0
+    headers = [
+        "SKU",
+        "Product title ",
+        "Id",
+        "ASIN",
+        "FNSKU",
+        "Condition",
+        "Prep type",
+        "Who preps units?",
+        "Who labels units?",
+        "Expected quantity",
+        "Boxed quantity",
+    ]
+    for col, header in enumerate(headers, start=1):
+        ws.cell(5, col, header)
+    for offset, (sku, qty) in enumerate(skus):
+        ws.cell(6 + offset, 1, sku)
+        ws.cell(6 + offset, 10, qty)
+    spec_row = 6 + len(skus) + 1
+    for i, label in enumerate(labels):
+        ws.cell(spec_row + i, 1, label)
+    wb.create_sheet("Metadata")
+    wb.save(path)
 
 
 if __name__ == "__main__":

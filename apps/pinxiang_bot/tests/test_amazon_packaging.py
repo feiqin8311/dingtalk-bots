@@ -14,7 +14,11 @@ APP_DIR = Path(__file__).resolve().parents[1]
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-from amazon_packaging import expand_packing_rows_to_boxes, fill_amazon_packaging_file  # noqa: E402
+from amazon_packaging import (  # noqa: E402
+    expand_packing_rows_to_boxes,
+    fill_amazon_packaging_file,
+    is_amazon_packaging_workbook,
+)
 from amazon_export import CM_TO_INCH, KG_TO_LB  # noqa: E402
 from packing import PackingRow  # noqa: E402
 
@@ -71,6 +75,44 @@ class AmazonPackagingTests(unittest.TestCase):
             self.assertEqual(ws.cell(7, 13).value, 60)
             self.assertEqual(ws.cell(7, 16).value, 55)
             wb.close()
+
+    def test_english_sheet_is_detected_and_filled(self):
+        from openpyxl import Workbook, load_workbook
+
+        rows = [
+            PackingRow("WH", "804016", "804016", 700, 100, 2, 12.64, 29, 38, 31, "拼箱"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "en.xlsx"
+            wb = Workbook()
+            wb.active.title = "Instructions"
+            ws = wb.create_sheet("Box packing information")
+            ws.cell(3, 13, 0)
+            for col, header in enumerate(
+                ["SKU", "title", "Id", "ASIN", "FNSKU", "c", "p", "prep", "label", "Expected quantity", "Boxed quantity"],
+                start=1,
+            ):
+                ws.cell(5, col, header)
+            ws.cell(6, 1, "804016")
+            ws.cell(6, 10, 700)
+            ws.cell(8, 1, "Name of box")
+            ws.cell(9, 1, "Box weight (lb):")
+            ws.cell(10, 1, "Box width (inch):")
+            ws.cell(11, 1, "Box length (inch):")
+            ws.cell(12, 1, "Box height (inch):")
+            wb.create_sheet("Metadata")
+            wb.save(src)
+
+            self.assertTrue(is_amazon_packaging_workbook(src))
+            out = Path(tmp) / "filled.xlsx"
+            fill_amazon_packaging_file(src, rows, out)
+            filled_wb = load_workbook(out, data_only=True)
+            filled = filled_wb["Box packing information"]
+            self.assertEqual(filled.cell(5, 13).value, "Box 1 quantity")
+            self.assertEqual(filled.cell(8, 13).value, "P1 - B1")
+            self.assertEqual(filled.cell(6, 13).value, 100)
+            self.assertEqual(filled.cell(6, 14).value, 100)
+            filled_wb.close()
 
 
 if __name__ == "__main__":

@@ -17,6 +17,24 @@ from openpyxl.cell.cell import MergedCell
 
 from . import config
 
+# 卖家后台装箱表：中文 STA / 英文 STA（Locale=en_US）
+AMAZON_PACKAGING_SHEETS = ("包装箱包装信息", "Box packing information")
+AMAZON_PACKING_LABELS = {
+    "name": ("包装箱名称", "Name of box"),
+    "weight": ("包装箱重量", "Box weight"),
+    "width": ("包装箱宽度", "Box width"),
+    "length": ("包装箱长度", "Box length"),
+    "height": ("包装箱高度", "Box height"),
+}
+_PACKING_SKU_STOP_PREFIXES = (
+    "包装箱",
+    "Name of box",
+    "Box weight",
+    "Box width",
+    "Box length",
+    "Box height",
+)
+
 # 设置pandas显示选项
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', None)
@@ -756,12 +774,29 @@ class PackingBoxProcessor:
             renumbered.append((f"第{index}组{suffix}", skus, group_weight))
         return renumbered
 
+    @staticmethod
+    def resolve_amazon_packaging_sheet(sheet_names) -> str:
+        names = list(sheet_names)
+        for name in AMAZON_PACKAGING_SHEETS:
+            if name in names:
+                return name
+        existing = "、".join(names) if names else "无"
+        raise ValueError(
+            f"未找到装箱工作表「包装箱包装信息」或「Box packing information」（现有：{existing}）"
+        )
+
     def insert_data_to_amazon_packaging(self, amazon_packaging_file_path, merge_summary):
         """将拼箱数据插入到Amazon包装信息文件中"""
         print(f"\n📦 开始处理Amazon包装信息...")
         
-        # 读取并分组数据
-        package_df = pd.read_excel(amazon_packaging_file_path, sheet_name="包装箱包装信息", skiprows=4)
+        xl = pd.ExcelFile(amazon_packaging_file_path)
+        try:
+            sheet_name = self.resolve_amazon_packaging_sheet(xl.sheet_names)
+            package_df = pd.read_excel(xl, sheet_name=sheet_name, skiprows=4)
+        finally:
+            xl.close()
+        if "SKU" not in package_df.columns:
+            raise ValueError(f"工作表「{sheet_name}」缺少 SKU 列")
         nan_index = package_df[package_df['SKU'].isna()].index[0]
         first_group = package_df.iloc[:nan_index][['SKU']]
         
@@ -801,7 +836,7 @@ class PackingBoxProcessor:
 
         # 加载Excel文件并插入数据
         wb = load_workbook(amazon_packaging_file_path)
-        ws = wb["包装箱包装信息"]
+        ws = wb[sheet_name]
         start_col = 13
         total_box_count = self._get_total_box_count(merge_summary)
         self._update_amazon_box_headers(ws, start_col, total_box_count)
@@ -843,28 +878,37 @@ class PackingBoxProcessor:
         """更新包装箱总数单元格。"""
         self._write_cell_value(ws, 3, 13, total_box_count)
 
-    def _find_amazon_packaging_label_row(self, ws, prefix: str):
+    def _find_amazon_packaging_label_row(self, ws, prefixes):
+        if isinstance(prefixes, str):
+            prefixes = (prefixes,)
         for row in range(1, (ws.max_row or 1) + 1):
             value = ws.cell(row, 1).value
-            if value is not None and str(value).strip().startswith(prefix):
+            if value is None:
+                continue
+            text = str(value).strip()
+            if any(text.startswith(prefix) for prefix in prefixes):
                 return row
         return None
 
     def _amazon_spec_rows(self, ws):
         """重量/宽/长/高所在行；找不到时回退到名称行下一行起连续4行。"""
-        labels = ("包装箱重量", "包装箱宽度", "包装箱长度", "包装箱高度")
-        found = [self._find_amazon_packaging_label_row(ws, label) for label in labels]
+        found = [
+            self._find_amazon_packaging_label_row(ws, AMAZON_PACKING_LABELS[key])
+            for key in ("weight", "width", "length", "height")
+        ]
         if all(found):
             return found  # type: ignore[return-value]
-        name_row = self._find_amazon_packaging_label_row(ws, "包装箱名称") or 17
+        name_row = self._find_amazon_packaging_label_row(ws, AMAZON_PACKING_LABELS["name"]) or 17
         return [name_row + 1, name_row + 2, name_row + 3, name_row + 4]
 
     def _update_amazon_box_headers(self, ws, start_col, total_box_count):
         """更新箱数量列标题和包装箱名称行。"""
-        name_row = self._find_amazon_packaging_label_row(ws, "包装箱名称") or 17
+        name_row = self._find_amazon_packaging_label_row(ws, AMAZON_PACKING_LABELS["name"]) or 17
+        english = self._find_amazon_packaging_label_row(ws, "Name of box") is not None
         for idx in range(total_box_count):
             col = start_col + idx
-            self._write_cell_value(ws, 5, col, f"包装箱 {idx + 1} 数量")
+            header = f"Box {idx + 1} quantity" if english else f"包装箱 {idx + 1} 数量"
+            self._write_cell_value(ws, 5, col, header)
             self._write_cell_value(ws, name_row, col, f"P1 - B{idx + 1}")
 
     def _update_amazon_packed_quantity(self, ws):
@@ -875,7 +919,7 @@ class PackingBoxProcessor:
             if sku_value in (None, ""):
                 row += 1
                 continue
-            if str(sku_value).strip().startswith("包装箱"):
+            if any(str(sku_value).strip().startswith(p) for p in _PACKING_SKU_STOP_PREFIXES):
                 break
             expected_quantity = ws.cell(row=row, column=10).value
             self._write_cell_value(ws, row, 11, expected_quantity)
