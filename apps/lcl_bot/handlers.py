@@ -630,6 +630,20 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         if merge_summary.empty:
             raise ValueError("拼箱计算结果中没有可用的SKU行")
 
+        # 写出时同组「实际箱数」是合并单元格；新拆出的组也可能漏填。
+        # 不能按列 ffill：单独装箱共用小组名但箱数不同。空值按 发货数量/单份数量 反推。
+        if '实际箱数' in merge_summary.columns:
+            actual = pd.to_numeric(merge_summary['实际箱数'], errors='coerce')
+            missing = actual.isna()
+            if missing.any():
+                inferred = pd.to_numeric(
+                    merge_summary.apply(PackingBoxProcessor._infer_actual_box_count, axis=1),
+                    errors='coerce',
+                )
+                inferred = inferred.where(inferred > 0)
+                actual = actual.where(~missing, inferred)
+            merge_summary['实际箱数'] = actual
+
         numeric_columns = ['发货数量', '单份数量', '单箱重量', '单箱理论长', '单箱理论宽', '单箱理论高']
         if '箱数' in merge_summary.columns:
             numeric_columns.append('箱数')

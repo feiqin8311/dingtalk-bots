@@ -668,7 +668,8 @@ class PackingBoxProcessor:
                 return number_part
         return text
 
-    def _infer_actual_box_count(self, row):
+    @staticmethod
+    def _infer_actual_box_count(row):
         """优先通过发货数量和单份数量反推实际箱数，回退到箱数字段。"""
         quantity = row.get('发货数量')
         units_per_box = row.get('单份数量')
