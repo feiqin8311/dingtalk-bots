@@ -23,6 +23,7 @@ PathLike = Union[str, Path]
 CM_TO_INCH = 0.393701
 KG_TO_LB = 2.20462
 SHEET_NAME = "包装箱包装信息"
+SHEET_NAMES = (SHEET_NAME, "Box packing information")
 START_COL = 13
 SKU_HEADER_ROW = 5
 SKU_DATA_START_ROW = 6
@@ -132,24 +133,30 @@ def fill_amazon_packaging_file(
         raise ValueError("拼箱结果为空，无法填写包装箱包装信息")
 
     wb = load_workbook(out)
-    if SHEET_NAME not in wb.sheetnames:
-        raise ValueError(f"文件缺少工作表「{SHEET_NAME}」，请上传亚马逊装箱信息表")
-    ws = wb[SHEET_NAME]
+    sheet_name = next((name for name in SHEET_NAMES if name in wb.sheetnames), None)
+    if sheet_name is None:
+        existing = "、".join(wb.sheetnames) if wb.sheetnames else "无"
+        raise ValueError(
+            f"文件缺少工作表「包装箱包装信息」或「Box packing information」（现有：{existing}）"
+        )
+    ws = wb[sheet_name]
 
     total = len(boxes)
     ws.cell(3, START_COL, total)
 
+    english = _find_row_by_label(ws, "Name of box") is not None
     for idx in range(total):
         col = START_COL + idx
-        ws.cell(SKU_HEADER_ROW, col, f"包装箱 {idx + 1} 数量")
+        header = f"Box {idx + 1} quantity" if english else f"包装箱 {idx + 1} 数量"
+        ws.cell(SKU_HEADER_ROW, col, header)
 
-    name_row = _find_row_by_label(ws, "包装箱名称")
-    weight_row = _find_row_by_label(ws, "包装箱重量")
-    width_row = _find_row_by_label(ws, "包装箱宽度")
-    length_row = _find_row_by_label(ws, "包装箱长度")
-    height_row = _find_row_by_label(ws, "包装箱高度")
+    name_row = _find_row_by_label(ws, "包装箱名称", "Name of box")
+    weight_row = _find_row_by_label(ws, "包装箱重量", "Box weight")
+    width_row = _find_row_by_label(ws, "包装箱宽度", "Box width")
+    length_row = _find_row_by_label(ws, "包装箱长度", "Box length")
+    height_row = _find_row_by_label(ws, "包装箱高度", "Box height")
     if name_row is None:
-        raise ValueError("未找到「包装箱名称」行")
+        raise ValueError("未找到「包装箱名称」或「Name of box」行")
 
     for idx in range(total):
         col = START_COL + idx
@@ -170,7 +177,8 @@ def fill_amazon_packaging_file(
         sku = ws.cell(r, 1).value
         if sku is None or str(sku).strip() == "":
             break
-        if str(sku).strip() in {"包装箱名称", "STOP"}:
+        text = str(sku).strip()
+        if text in {"包装箱名称", "STOP"} or text.startswith(("包装箱名称", "Name of box")):
             break
         data_rows.append((r, str(sku).strip()))
 
@@ -195,7 +203,7 @@ def fill_amazon_packaging_file(
 def is_amazon_packaging_workbook(path: PathLike) -> bool:
     try:
         wb = load_workbook(path, read_only=True)
-        ok = SHEET_NAME in wb.sheetnames
+        ok = any(name in wb.sheetnames for name in SHEET_NAMES)
         wb.close()
         return ok
     except Exception:
@@ -233,10 +241,15 @@ def _units_for_sku(amazon_sku: str, box: BoxPlan) -> int:
     return 0
 
 
-def _find_row_by_label(ws, prefix: str) -> int | None:
-    for r in range(1, min((ws.max_row or 1) + 1, 80)):
+def _find_row_by_label(ws, *prefixes: str) -> int | None:
+    if not prefixes:
+        return None
+    for r in range(1, (ws.max_row or 1) + 1):
         val = ws.cell(r, 1).value
-        if val is not None and str(val).strip().startswith(prefix):
+        if val is None:
+            continue
+        text = str(val).strip()
+        if any(text.startswith(prefix) for prefix in prefixes):
             return r
     return None
 
