@@ -104,6 +104,67 @@ class LclPackMergeTest(unittest.TestCase):
         self.assertEqual(out.loc[0, "青山湖仓库-第2组单份数量1"], 24)
         self.assertEqual(out.loc[1, "良品仓-第3组单份数量1"], 48)
 
+    def test_floor_non_integer_share_quantity_and_total(self):
+        processor = PackingBoxProcessor("in.xlsx", "out.xlsx")
+        df = pd.DataFrame(
+            {
+                "SKU": ["80375221", "801801", "tiny"],
+                "发货数量": [74, 1000, 4],
+                "单箱数量": [60, 125, 10],
+                "箱数": [74 / 60, 8.0, 0.4],
+                "是否拼箱": ["拼箱", "拼箱", "拼箱"],
+                "_force_packing": [False, True, False],
+            }
+        )
+
+        out = processor._floor_non_integer_share_quantities(df)
+        hit = out.loc[out["SKU"] == "80375221"].iloc[0]
+        self.assertEqual(hit["发货数量"], 70)
+        self.assertEqual(processor._determine_units_per_box_for_packing(hit), 14)
+
+        forced = out.loc[out["SKU"] == "801801"].iloc[0]
+        self.assertEqual(forced["发货数量"], 1000)
+        self.assertEqual(processor._determine_units_per_box_for_packing(forced), 125)
+
+        tiny = out.loc[out["SKU"] == "tiny"].iloc[0]
+        self.assertEqual(tiny["发货数量"], 4)
+
+    def test_packing_result_columns_drop_internal_fields(self):
+        processor = PackingBoxProcessor("in.xlsx", "out.xlsx")
+        cols = processor._get_output_columns(include_warehouse=True)
+        self.assertEqual(
+            cols,
+            [
+                "SKU",
+                "发货仓库（单据）",
+                "发货数量",
+                "是否拼箱",
+                "单份数量",
+                "小组名称",
+                "实际箱数",
+                "单箱重量",
+                "单箱理论长",
+                "单箱理论宽",
+                "单箱理论高",
+            ],
+        )
+        dropped = {
+            "品名",
+            "箱数",
+            "单品毛重（g）",
+            "箱子毛重（kg）",
+            "单品长（cm）",
+            "单品宽（cm）",
+            "单品高（cm）",
+            "备注",
+            "单份总重量",
+            "重量差",
+            "单品体积",
+            "单份体积",
+            "单箱体积",
+        }
+        self.assertTrue(dropped.isdisjoint(cols))
+
 
 if __name__ == "__main__":
     unittest.main()
