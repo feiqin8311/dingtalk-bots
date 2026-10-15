@@ -729,36 +729,44 @@ class PinxiangBotHandler(dingtalk_stream.ChatbotHandler):
             )
             return
         if existing is not None:
-            # 运营上传优先：覆盖当前单（含物流转发的同单）
+            # 记录原物流来源（用于通知）
+            prev_logistics_uid = existing.logistics_user_id
+            # 覆盖当前单（含物流转发的同单）：保留原物流元信息，只用运营新版非空字段更新
             existing.packing_result_path = packing_path
             existing.merge_dir = job_dir
             existing.shipment_path = packing_path
             existing.amazon_template_path = amazon_template_path if amazon_template_path else None
             existing.logistics_name_hint = existing.logistics_name_hint or "运营自助"
-            if result.logistics_channel:
-                existing.logistics_channel = result.logistics_channel
-            if result.store_name:
-                existing.store_name = result.store_name
-            if result.country:
-                existing.country = result.country
+            # 只用非空值覆盖，避免运营版缺列时擦掉原物流元信息
+            if result.logistics_channel and result.logistics_channel.strip():
+                existing.logistics_channel = result.logistics_channel.strip()
+            if result.store_name and result.store_name.strip():
+                existing.store_name = result.store_name.strip()
+            if result.country and result.country.strip():
+                existing.country = result.country.strip()
             existing.updated_at = time.time()
-            self._persist_pending_state()
-            if amazon_template_path and Path(amazon_template_path).is_file():
-                tpl = Path(amazon_template_path)
-                await self._send_file(
+
+            # 原 active 单来自物流 → 通知物流侧（不抄送文件）
+            if prev_logistics_uid and prev_logistics_uid.strip():
+                ops_name = next(
+                    (o["name"] for o in self.ops_users if o.get("user_id") == user_id),
                     user_id,
-                    tpl.name,
-                    tpl.read_bytes(),
-                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-            await self._send_text(
+                await self._send_text(
+                    prev_logistics_uid,
+                    f"【不分仓拼箱】运营【{ops_name}】已自行上传本单拼箱结果，"
+                    f"已替换原物流分发文件。\n"
+                    f"拼箱结果：{packing_name}\n"
+                    "请知悉，无需操作。",
+                )
+
+            self._persist_pending_state()
+            # 重发完整文件组（文本 + 拼箱结果 + 模板）给运营
+            ops_name = next(
+                (o["name"] for o in self.ops_users if o.get("user_id") == user_id),
                 user_id,
-                "✅ 已用您上传的拼箱数据更新当前任务，并重新生成 Amazon 模板1。\n"
-                "与物流转发重复时以您上传为准。"
-                f"{drop_note}\n"
-                "可继续上传「包装箱包装信息」装箱表，或回复【模板2】。\n"
-                "回复【取消】放弃当前任务。",
             )
+            await self._push_ops_job_files(user_id, ops_name, existing)
             return
 
         job = PendingOpsJob(
