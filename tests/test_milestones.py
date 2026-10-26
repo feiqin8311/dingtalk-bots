@@ -64,6 +64,10 @@ class MatchMilestoneTests(unittest.TestCase):
             match_milestone(_ev("出发地：中国宁波"), "longzhou"),
             "lz:ningbo",
         )
+        self.assertEqual(
+            match_milestone(_ev("出发地 中国上海"), "longzhou"),
+            "lz:ningbo",
+        )
         self.assertEqual(match_milestone(_ev("已到达卸货港"), "longzhou"), "lz:pod")
         self.assertEqual(match_milestone(_ev("已提柜"), "longzhou"), "lz:pickup")
         self.assertEqual(
@@ -237,7 +241,7 @@ class MatchMilestoneTests(unittest.TestCase):
         self.assertEqual(milestone_label("yh:sail"), "已开船")
 
     def test_milestone_label_is_chinese_only(self):
-        self.assertEqual(milestone_label("lz:ningbo"), "出发地 中国宁波")
+        self.assertEqual(milestone_label("lz:ningbo"), "出发地 中国")
         self.assertEqual(milestone_label("lz:pod"), "已到达卸货港")
         self.assertEqual(milestone_label("lz:pickup"), "已提柜")
         self.assertEqual(milestone_label("lz:fc"), "货物已送达 FC 场地")
@@ -394,7 +398,7 @@ class EmitIncrementalTests(unittest.TestCase):
             )
             self.assertEqual(
                 bucket[0].detail,
-                "2026-07-04 出发地 中国宁波\n已到达卸货港\n已提柜\n货物已送达 FC 场地",
+                "2026-07-04 出发地 中国\n已到达卸货港\n已提柜\n货物已送达 FC 场地",
             )
             for ek in bucket[0].event_keys:
                 store.mark_event("AL0-WJGKPUMD5XQXA", ek, "sent")

@@ -6,7 +6,7 @@ from pingyi_client import TrackEvent
 
 
 def _compact(text: str) -> str:
-    """去空白/标点后小写，便于「出发地 中国宁波」≈「出发地：中国宁波」。"""
+    """去空白/标点后小写，便于「出发地 中国上海」≈「出发地：中国上海」。"""
     return re.sub(r"[\s:：·.。,，/\\_-]+", "", (text or "")).lower()
 
 
@@ -19,7 +19,7 @@ _PINGYI: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
 
 # 龙舟：描述包含关键字
 _LONGZHOU: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("lz:ningbo", ("出发地中国宁波",)),
+    ("lz:ningbo", ("出发地中国",)),
     ("lz:pod", ("已到达卸货港",)),
     ("lz:pickup", ("已提柜",)),
     ("lz:fc", ("货物已送达fc场地", "货物已送达FC场地")),
@@ -74,7 +74,7 @@ _LABELS: dict[str, str] = {
     "py:KC": "船只从始发港离港",
     "py:DG": "船只到达目的港",
     "py:SC": "货件已被完整配送至亚马逊仓库",
-    "lz:ningbo": "出发地 中国宁波",
+    "lz:ningbo": "出发地 中国",
     "lz:pod": "已到达卸货港",
     "lz:pickup": "已提柜",
     "lz:fc": "货物已送达 FC 场地",
