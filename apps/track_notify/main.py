@@ -73,9 +73,9 @@ def _save_last_run_ymd(state_dir: Path, ymd: str) -> None:
 
 
 CST = timezone(timedelta(hours=8))
-# Mon=0 ... Sun=6；周一、周三 07:00 Asia/Shanghai
+# Mon=0 ... Sun=6；周一、周三 10:00 Asia/Shanghai
 SCHEDULE_WEEKDAYS = frozenset({0, 2})
-SCHEDULE_HOUR = 7
+SCHEDULE_HOUR = 10
 SCHEDULE_MINUTE = 0
 
 
@@ -134,7 +134,7 @@ def _next_run_at(
     last_run_ymd: str | None = None,
 ) -> datetime:
     """
-    下一调度点。若今天是 Mon/Wed、已过 07:00、且今天尚未成功跑过 → 立即（catch-up）。
+    下一调度点。若今天是 Mon/Wed、已过 10:00、且今天尚未成功跑过 → 立即（catch-up）。
     """
     now = now or datetime.now(tz=CST)
     today_ymd = now.strftime("%Y-%m-%d")
@@ -219,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--daemon",
         action="store_true",
-        help="stay running; run on Mon/Wed 07:00 Asia/Shanghai",
+        help="stay running; run on Mon/Wed 10:00 Asia/Shanghai",
     )
     parser.add_argument("--dry-run", action="store_true", help="do not write state or notify")
     args = parser.parse_args(argv)

@@ -26,7 +26,7 @@ from excel_export import (
     format_shipped_at,
     write_report_xlsx,
 )
-from gateway_client import LogisticsGatewayClient
+from gateway_client import GatewayCircuitOpen, LogisticsGatewayClient
 from milestones import (
     event_has_date,
     filter_new_milestones,
@@ -37,6 +37,19 @@ from meitong_client import MeitongClient
 from owners import notify_user_ids
 from pingyi_client import PingyiClient, TrackShipment
 from settings import TrackNotifyConfig
+
+
+def _gateway_circuit_open(gateway: LogisticsGatewayClient | None) -> bool:
+    return gateway is not None and getattr(gateway, "circuit_open", False) is True
+
+
+def _log_gateway_query_fail(
+    logger: logging.Logger, exc: BaseException, fmt: str, *args: Any
+) -> None:
+    if isinstance(exc, GatewayCircuitOpen):
+        logger.warning(fmt, *args)
+    else:
+        logger.exception(fmt, *args)
 
 
 def _carrier_kind(carrier: str) -> str:
@@ -185,10 +198,16 @@ def _emit_events(
     detail = "\n".join(detail_parts)
     message = f"{display_code} 节点{len(event_keys)}条"
     base = _row_base(row)
+    lead_key = event_keys[0]
+    bucket[:] = [
+        it
+        for it in bucket
+        if not (it.shipment_key == shipment_key and it.event_key == lead_key)
+    ]
     bucket.append(
         ReportItem(
             shipment_key=shipment_key,
-            event_key=event_keys[0],
+            event_key=lead_key,
             message=message,
             user_ids=list(user_ids),
             invoice_no=base["invoice_no"],
@@ -463,7 +482,9 @@ def _process_longzhou_row(
             query_ok = False
             line = _query_fail_line(row, logistics_no, str(exc))
             issues.append(line)
-            logger.exception(
+            _log_gateway_query_fail(
+                logger,
+                exc,
                 "gateway longzhou failed logistics_no=%s brand=%s: %s",
                 logistics_no,
                 brand,
@@ -551,6 +572,9 @@ def _retry_longzhou_query_errors(
     stats = {"gateway_retry": 0, "gateway_recovered": 0}
     if gateway is None:
         return stats
+    if _gateway_circuit_open(gateway):
+        logger.warning("skip longzhou retry pass: gateway circuit open")
+        return stats
 
     by_no: dict[str, TableRow] = {}
     for row in rows:
@@ -600,6 +624,13 @@ def _retry_longzhou_query_errors(
                 brand,
                 exc,
             )
+            if _gateway_circuit_open(gateway):
+                left = len(targets) - i - 1
+                logger.warning(
+                    "abort remaining longzhou retries (%s left): gateway circuit open",
+                    left,
+                )
+                break
             continue
 
         # 去掉本单首次 query_error（无论成功有轨迹 / 确认无轨迹）
@@ -705,7 +736,9 @@ def _process_baosen_row(
             query_ok = False
             line = _query_fail_line(row, code, str(exc))
             issues.append(line)
-            logger.exception("gateway baosen failed fba=%s: %s", code, exc)
+            _log_gateway_query_fail(
+                logger, exc, "gateway baosen failed fba=%s: %s", code, exc
+            )
             notified += _collect_once(
                 shipment_key=code,
                 event_key="query_error",
@@ -779,6 +812,9 @@ def _retry_baosen_query_errors(
     stats = {"baosen_retry": 0, "baosen_recovered": 0}
     if gateway is None or not bucket:
         return stats
+    if _gateway_circuit_open(gateway):
+        logger.warning("skip baosen retry pass: gateway circuit open")
+        return stats
 
     by_fba: dict[str, TableRow] = {}
     for row in rows:
@@ -816,6 +852,13 @@ def _retry_baosen_query_errors(
             shipment = gateway.query_fba(code, platform="baosen")
         except Exception as exc:
             logger.warning("baosen retry still failed fba=%s: %s", code, exc)
+            if _gateway_circuit_open(gateway):
+                left = len(targets) - i - 1
+                logger.warning(
+                    "abort remaining baosen retries (%s left): gateway circuit open",
+                    left,
+                )
+                break
             continue
 
         bucket[:] = [
@@ -1202,7 +1245,9 @@ def _process_yinghe_row(
             query_ok = False
             line = _query_fail_line(row, logistics_no, str(exc))
             issues.append(line)
-            logger.exception(
+            _log_gateway_query_fail(
+                logger,
+                exc,
                 "gateway yinghe failed logistics_no=%s: %s",
                 logistics_no,
                 exc,
@@ -1285,6 +1330,9 @@ def _retry_yinghe_query_errors(
     stats = {"yinghe_retry": 0, "yinghe_recovered": 0}
     if gateway is None:
         return stats
+    if _gateway_circuit_open(gateway):
+        logger.warning("skip yinghe retry pass: gateway circuit open")
+        return stats
 
     by_no: dict[str, TableRow] = {}
     for row in rows:
@@ -1330,6 +1378,13 @@ def _retry_yinghe_query_errors(
                 logistics_no,
                 exc,
             )
+            if _gateway_circuit_open(gateway):
+                left = len(targets) - i - 1
+                logger.warning(
+                    "abort remaining yinghe retries (%s left): gateway circuit open",
+                    left,
+                )
+                break
             continue
 
         bucket[:] = [
@@ -1743,6 +1798,9 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
                     stats["missing_key"] += 1
                 stats["processed"] += 1
                 stats["collected"] += collected
+                if query_ok:
+                    for code in [*row.logistics_nos, *row.fba_codes]:
+                        _drop_transient_issues(bucket, code)
                 for it in local:
                     k = (it.shipment_key, it.event_key)
                     if k in seen_keys:
@@ -1809,6 +1867,8 @@ def run_once(config: TrackNotifyConfig, *, dry_run: bool = False) -> dict[str, i
             pause_sec=1.0,
         )
         stats.update(mt_retry)
+        if _gateway_circuit_open(gateway):
+            stats["gateway_circuit_open"] = 1
         # 重试后问题行可能变少，issue 摘要以 bucket 为准
         if (
             retry_stats.get("gateway_recovered")

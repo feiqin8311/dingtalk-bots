@@ -14,7 +14,12 @@ APP = ROOT / "apps" / "track_notify"
 if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 
-from gateway_client import LogisticsGatewayClient, normalize_agl_time  # noqa: E402
+from gateway_client import (  # noqa: E402
+    GatewayCircuitOpen,
+    LogisticsGatewayClient,
+    is_gateway_down_error,
+    normalize_agl_time,
+)
 
 
 SAMPLE_AGL = {
@@ -169,6 +174,64 @@ class GatewayClientTests(unittest.TestCase):
                 for f in futs:
                     self.assertIsNotNone(f.result())
         self.assertEqual(peak, 1)
+
+    def test_circuit_opens_after_consecutive_timeouts_then_fail_fast(self):
+        client = LogisticsGatewayClient(
+            "http://example.test", "token", circuit_fail_threshold=3
+        )
+        calls = {"n": 0}
+
+        def fake_urlopen(req, timeout=0):
+            calls["n"] += 1
+            raise TimeoutError("timed out")
+
+        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            for _ in range(3):
+                with self.assertRaises(TimeoutError):
+                    client.query_longzhou("AL0-X", brand="X")
+            self.assertTrue(client.circuit_open)
+            with self.assertRaises(GatewayCircuitOpen):
+                client.query_longzhou("AL0-Y", brand="X")
+        self.assertEqual(calls["n"], 3)
+
+    def test_success_resets_consecutive_failures(self):
+        client = LogisticsGatewayClient(
+            "http://example.test", "token", circuit_fail_threshold=3
+        )
+        n = {"i": 0}
+
+        def fake_urlopen(req, timeout=0):
+            n["i"] += 1
+            if n["i"] in {1, 2, 4}:
+                raise TimeoutError("timed out")
+            return FakeResponse(SAMPLE_AGL)
+
+        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            for _ in range(2):
+                with self.assertRaises(TimeoutError):
+                    client.query_longzhou("AL0-A", brand="X")
+            self.assertFalse(client.circuit_open)
+            self.assertIsNotNone(client.query_longzhou("AL0-B", brand="X"))
+            with self.assertRaises(TimeoutError):
+                client.query_longzhou("AL0-C", brand="X")
+            self.assertFalse(client.circuit_open)
+
+    def test_business_error_does_not_open_circuit(self):
+        client = LogisticsGatewayClient(
+            "http://example.test", "token", circuit_fail_threshold=1
+        )
+
+        def fake_urlopen(req, timeout=0):
+            return FakeResponse(
+                {"success": False, "data": None, "error": "缺少物流编号"}
+            )
+
+        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(RuntimeError) as ctx:
+                client.query_fba("FBA15LZG9QTX", platform="baosen")
+        self.assertIn("缺少物流编号", str(ctx.exception))
+        self.assertFalse(client.circuit_open)
+        self.assertFalse(is_gateway_down_error(ctx.exception))
 
 
 if __name__ == "__main__":

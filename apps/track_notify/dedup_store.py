@@ -166,13 +166,16 @@ class TrackStateStore:
 
     def sync_pending_items(self, items: list[dict[str, Any]]) -> None:
         """用当前 bucket 全量覆盖 pending（查一行后调用，崩溃可恢复）。"""
+        collapsed: dict[tuple[str, str], dict[str, Any]] = {}
+        for raw in items:
+            sk = str(raw.get("shipment_key") or "")
+            ek = str(raw.get("event_key") or "")
+            if not sk or not ek:
+                continue
+            collapsed[(sk, ek)] = raw
         with self._lock:
             self._conn.execute("DELETE FROM pending_report_items")
-            for raw in items:
-                sk = str(raw.get("shipment_key") or "")
-                ek = str(raw.get("event_key") or "")
-                if not sk or not ek:
-                    continue
+            for (sk, ek), raw in collapsed.items():
                 self._conn.execute(
                     """
                     INSERT INTO pending_report_items (shipment_key, event_key, payload)
