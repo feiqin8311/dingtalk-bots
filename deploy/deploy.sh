@@ -53,6 +53,8 @@ echo "==> rsync -> ${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}"
 rsync -az --delete \
   --exclude '.git/' \
   --exclude '.codegraph/' \
+  --exclude '.venv/' \
+  --exclude '.pytest_cache/' \
   --exclude '.DS_Store' \
   --exclude '**/__pycache__/' \
   --exclude '**/*.pyc' \

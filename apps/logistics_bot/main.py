@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
-import asyncio
-import json
 import sys
 import threading
 from pathlib import Path
@@ -20,16 +18,26 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import dingtalk_stream
-import websockets
 
 from settings import load_config_from_env
 from router import LogisticsRouter
 from shared.logging import setup_logger
+from shared.stream_client import ResilientDingTalkStreamClient
+
+
+_TRACK_NOTIFY_RESTART_BASE_SEC = 30
+_TRACK_NOTIFY_RESTART_MAX_SEC = 30 * 60
+# a run that lasted this long counts as healthy: reset the backoff
+_TRACK_NOTIFY_HEALTHY_RUN_SEC = 10 * 60
 
 
 def _start_track_notify_daemon(logger) -> None:
-    """Mon/Wed 10:00 轨迹查询：子进程跑，避免与 logistics_bot 的 settings 模块名冲突。"""
+    """Mon/Wed 10:00 轨迹查询：子进程跑，避免与 logistics_bot 的 settings 模块名冲突。
+
+    子进程退出后按指数退避自动重启（30s → 最长 30min），否则调度会静默停掉。
+    """
     import subprocess
+    import time
 
     track_main_path = ROOT_DIR / "apps" / "track_notify" / "main.py"
     if not track_main_path.is_file():
@@ -37,51 +45,27 @@ def _start_track_notify_daemon(logger) -> None:
         return
 
     def _target() -> None:
-        try:
-            # 独立解释器：track_notify/settings.py 不会被 logistics_bot.settings 挡住
-            proc = subprocess.Popen(
-                [sys.executable, str(track_main_path), "--daemon"],
-                cwd=str(ROOT_DIR),
-            )
-            code = proc.wait()
-            logger.error("track_notify daemon exited code=%s", code)
-        except Exception:
-            logger.exception("track_notify daemon crashed")
+        delay = _TRACK_NOTIFY_RESTART_BASE_SEC
+        while True:
+            started = time.monotonic()
+            try:
+                # 独立解释器：track_notify/settings.py 不会被 logistics_bot.settings 挡住
+                proc = subprocess.Popen(
+                    [sys.executable, str(track_main_path), "--daemon"],
+                    cwd=str(ROOT_DIR),
+                )
+                code = proc.wait()
+                logger.error("track_notify daemon exited code=%s", code)
+            except Exception:
+                logger.exception("track_notify daemon crashed")
+            if time.monotonic() - started >= _TRACK_NOTIFY_HEALTHY_RUN_SEC:
+                delay = _TRACK_NOTIFY_RESTART_BASE_SEC
+            logger.warning("track_notify daemon restarting in %ss", delay)
+            time.sleep(delay)
+            delay = min(delay * 2, _TRACK_NOTIFY_RESTART_MAX_SEC)
 
     threading.Thread(target=_target, name="track-notify", daemon=True).start()
     logger.info("track_notify subprocess scheduler started (Mon/Wed 10:00 Asia/Shanghai)")
-
-
-class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):
-    def __init__(self, credential: dingtalk_stream.Credential, ping_interval: int, ping_timeout: int):
-        super().__init__(credential)
-        self._ping_interval = ping_interval
-        self._ping_timeout = ping_timeout
-
-    async def start(self):
-        self.pre_start()
-        while True:
-            try:
-                connection = self.open_connection()
-                if not connection:
-                    await asyncio.sleep(10)
-                    continue
-                uri = f"{connection['endpoint']}?ticket={connection['ticket']}"
-                async with websockets.connect(
-                    uri,
-                    ping_interval=self._ping_interval,
-                    ping_timeout=self._ping_timeout,
-                    close_timeout=10,
-                ) as websocket:
-                    self.websocket = websocket
-                    asyncio.create_task(self.keepalive(websocket))
-                    async for raw_message in websocket:
-                        asyncio.create_task(self.background_task(json.loads(raw_message)))
-            except KeyboardInterrupt:
-                break
-            except Exception:
-                await asyncio.sleep(3)
-                continue
 
 
 def main() -> None:
@@ -93,6 +77,7 @@ def main() -> None:
         credential,
         ping_interval=config.stream_ws_ping_interval,
         ping_timeout=config.stream_ws_ping_timeout,
+        logger=logger,
     )
     client.register_callback_handler(
         dingtalk_stream.chatbot.ChatbotMessage.TOPIC,

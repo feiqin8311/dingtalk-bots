@@ -45,6 +45,9 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         if not client_id or not client_secret:
             self.logger.warning("lcl_bot missing DingTalk credentials; file send may fail")
         self.dingtalk_api = DingTalkAPI(client_id or "", client_secret or "")
+        # Heavy steps now run in worker threads; this keeps lcl messages one-at-a-time
+        # (as when everything ran inline) so state checks like "logistics busy" stay valid.
+        self._process_lock = asyncio.Lock()
 
         # 定期清理工作目录（保留模板源文件夹）
         cleanup_old_files(config.EXCEL_FILES_DIR, days=7, exclude=["sample_data"])
@@ -123,7 +126,11 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 pass
     
     async def process(self, callback: dingtalk_stream.CallbackMessage):
-        """主消息处理入口"""
+        """主消息处理入口（串行：同一时间只处理一条分仓消息）"""
+        async with self._process_lock:
+            return await self._process_unlocked(callback)
+
+    async def _process_unlocked(self, callback: dingtalk_stream.CallbackMessage):
         try:
             incoming_message = dingtalk_stream.ChatbotMessage.from_dict(callback.data)
             
@@ -409,7 +416,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             # 1. 下载文件
             self.logger.info("开始下载发货单文件...")
             robot_code = incoming_message.robot_code
-            logistics_file_path = self.dingtalk_api.download_file(
+            logistics_file_path = await asyncio.to_thread(
+                self.dingtalk_api.download_file,
                 download_code, file_name, workflow_folder,
                 file_info=incoming_message.extensions.get('content', {}) if hasattr(incoming_message, 'extensions') else None,
                 robot_code=robot_code
@@ -448,10 +456,8 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         )
         return True
 
-    async def _pack_and_reply_shipment(
-        self, incoming_message, sender_id: str, conversation_id: str,
-        logistics_file_path: str, workflow_folder: str,
-    ) -> None:
+    def _compute_packing(self, logistics_file_path: str, workflow_folder: str):
+        """拼箱计算 + Amazon 模板生成（纯文件操作，不读写 state，可在线程中运行）"""
         shipment_info = None
         try:
             shipment_info = extract_shipment_info(logistics_file_path)
@@ -481,11 +487,25 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         amazon_template_path = os.path.join(workflow_folder, template_source_name)
         processor.create_amazon_template(amazon_template_path, merge_summary)
         self.logger.info(f"Amazon发货模板生成完成: {amazon_template_path}")
+        return shipment_info, shipping_numbers, result_file_path, amazon_template_path
+
+    async def _pack_and_reply_shipment(
+        self, incoming_message, sender_id: str, conversation_id: str,
+        logistics_file_path: str, workflow_folder: str,
+    ) -> None:
+        # pandas packing + template writing are pure file work: keep them off the shared event loop
+        shipment_info, shipping_numbers, result_file_path, amazon_template_path = await asyncio.to_thread(
+            self._compute_packing, logistics_file_path, workflow_folder
+        )
 
         self.logger.info("开始上传结果文件...")
-        media_id, uploaded_file_name = self._upload_stream_file(result_file_path, incoming_message)
+        media_id, uploaded_file_name = await asyncio.to_thread(
+            self._upload_stream_file, result_file_path, incoming_message
+        )
         session_webhook = incoming_message.session_webhook
-        self.dingtalk_api.send_file_message(sender_id, media_id, uploaded_file_name, webhook=session_webhook)
+        await asyncio.to_thread(
+            self.dingtalk_api.send_file_message, sender_id, media_id, uploaded_file_name, webhook=session_webhook
+        )
         self._send_excel_copy_to_others(media_id, uploaded_file_name, "拼箱结果")
 
         meta = self._shipment_meta_text(shipment_info=shipment_info)

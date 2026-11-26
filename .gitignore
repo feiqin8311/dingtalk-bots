@@ -24,3 +24,4 @@ files/*
 apps/pinxiang_bot/output/*
 !apps/pinxiang_bot/output/.gitkeep
 apps/pinxiang_bot/.bot-workspace/
+.venv/

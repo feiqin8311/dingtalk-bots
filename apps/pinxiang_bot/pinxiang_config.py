@@ -57,7 +57,8 @@ OPS_PENDING_TTL_SEC = int((os.getenv("PINXIANG_OPS_PENDING_TTL_SEC") or "604800"
 
 # Amazon Manifest 模板
 # MPL / MPL2：美国（in/lb）；MPL3：加拿大（cm/kg）
-_TEMPLATES_DIR = APP_DIR / "templates"
+# shared with lcl_bot: one copy of the Amazon manifest templates
+_TEMPLATES_DIR = ROOT_DIR / "shared" / "amazon_templates"
 AMAZON_TEMPLATE_MPL = Path(
     (
         os.getenv("PINXIANG_AMAZON_TEMPLATE_MPL")

@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
 from dataclasses import dataclass
@@ -21,11 +19,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import dingtalk_stream
-import websockets
 
 from Bot.handler import PdfSplitBotHandler
 from shared.env import load_env_files
 from shared.logging import setup_logger
+from shared.stream_client import ResilientDingTalkStreamClient
 
 
 logger = setup_logger("%(asctime)s %(name)s %(levelname)-8s %(message)s", "INFO")
@@ -78,37 +76,6 @@ def _load_config_from_env() -> Config:
     )
 
 
-class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):
-    def __init__(self, credential: dingtalk_stream.Credential, ping_interval: int, ping_timeout: int):
-        super().__init__(credential)
-        self._ping_interval = ping_interval
-        self._ping_timeout = ping_timeout
-
-    async def start(self):
-        self.pre_start()
-        while True:
-            try:
-                connection = self.open_connection()
-                if not connection:
-                    await asyncio.sleep(10)
-                    continue
-                uri = f"{connection['endpoint']}?ticket={connection['ticket']}"
-                async with websockets.connect(
-                    uri,
-                    ping_interval=self._ping_interval,
-                    ping_timeout=self._ping_timeout,
-                    close_timeout=10,
-                ) as websocket:
-                    self.websocket = websocket
-                    asyncio.create_task(self.keepalive(websocket))
-                    async for raw_message in websocket:
-                        asyncio.create_task(self.background_task(json.loads(raw_message)))
-            except KeyboardInterrupt:
-                break
-            except Exception:
-                await asyncio.sleep(3)
-                continue
-
 
 def main() -> None:
     config = _load_config_from_env()
@@ -117,6 +84,7 @@ def main() -> None:
         credential,
         ping_interval=config.stream_ws_ping_interval,
         ping_timeout=config.stream_ws_ping_timeout,
+        logger=logger,
     )
     client.register_callback_handler(
         dingtalk_stream.chatbot.ChatbotMessage.TOPIC,

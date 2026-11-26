@@ -21,12 +21,10 @@ from amazon_export import (  # noqa: E402
 )
 from packing import PackingResult, PackingRow, Template1Row, process_shipment_file  # noqa: E402
 
-TPL = APP_DIR / "templates" / (
-    "ManifestFileUpload_Template_IncludeCasePack_IncludeExpirationDate_IncludeMLC_MPL.xlsx"
-)
-TPL2 = APP_DIR / "templates" / (
-    "ManifestFileUpload_Template_IncludeCasePack_IncludeExpirationDate_IncludeMLC_MPL2.xlsx"
-)
+import pinxiang_config  # noqa: E402
+
+TPL = pinxiang_config.AMAZON_TEMPLATE_MPL
+TPL2 = pinxiang_config.AMAZON_TEMPLATE_MPL2
 TEST_SHIPMENT = Path("/Users/kerden/Desktop/测试数据/发货单-943520755484897280.xlsx")
 TEST_MANIFEST = Path(
     "/Users/kerden/Desktop/测试数据/"

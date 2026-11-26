@@ -24,10 +24,11 @@ import urllib.request
 import uuid
 from typing import Any, Dict, Optional
 
+from shared.dingtalk_token import get_access_token as shared_get_access_token
+
 from . import config
 
 
-_TOKEN_CACHE: Dict[tuple, Dict[str, Any]] = {}
 _COMMAND_QUEUE: Dict[str, list[Dict[str, Any]]] = {}
 _COMMAND_LOCK = threading.Lock()
 
@@ -138,26 +139,7 @@ class DingTalkNotifier:
         self.group_secret = group_secret or config.DINGTALK_GROUP_SECRET
 
     def get_access_token(self) -> str:
-        cache_key = (self.app_key, self.app_secret, self.api_base_url)
-        cached = _TOKEN_CACHE.get(cache_key)
-        if cached and time.time() < cached.get("expires_at", 0) - 60:
-            return cached["access_token"]
-
-        if not self.app_key or not self.app_secret:
-            raise RuntimeError("缺少 appKey/appSecret，无法获取 accessToken。")
-
-        token_url = f"{self.api_base_url}/v1.0/oauth2/accessToken"
-        payload = {"appKey": self.app_key, "appSecret": self.app_secret}
-        result = _post_json(token_url, payload)
-        token = result.get("accessToken") or result.get("access_token")
-        if not token:
-            raise RuntimeError(f"获取 accessToken 失败: {result}")
-        expires_in = result.get("expireIn") or result.get("expires_in") or 7200
-        _TOKEN_CACHE[cache_key] = {
-            "access_token": token,
-            "expires_at": time.time() + int(expires_in),
-        }
-        return token
+        return shared_get_access_token(self.app_key, self.app_secret, api_base_url=self.api_base_url)
 
     def get_download_url(self, download_code: str, robot_code: Optional[str] = None) -> str:
         if not download_code:

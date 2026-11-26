@@ -4,6 +4,7 @@
 工具函数模块 - 文件上传下载、钉钉API交互等
 """
 
+import logging
 import json
 import os
 import shutil
@@ -12,7 +13,12 @@ from typing import Optional, Sequence, Tuple, Union
 
 import requests
 
+from shared.dingtalk_token import get_access_token as shared_get_access_token
+from shared.dingtalk_token import get_corp_access_token as shared_get_corp_access_token
+
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 class DingTalkAPI:
@@ -22,10 +28,6 @@ class DingTalkAPI:
         """初始化钉钉API工具"""
         self.client_id = client_id
         self.client_secret = client_secret
-        self._access_token = None
-        self._token_expires_at = 0
-        self._corp_access_token = None
-        self._corp_token_expires_at = 0
         self._openid_userid_cache = {}
     
     def cache_openid_userid(self, open_id: Optional[str], user_id: Optional[str]) -> None:
@@ -34,74 +36,23 @@ class DingTalkAPI:
             self._openid_userid_cache[open_id] = user_id
     
     def get_access_token(self, force_refresh: bool = False) -> str:
-        """
-        获取访问令牌
-        
-        Args:
-            force_refresh: 是否强制刷新token
-            
-        Returns:
-            access_token字符串
-        """
-        # 如果token还未过期且不强制刷新，则返回缓存的token
-        if not force_refresh and self._access_token and time.time() < self._token_expires_at:
-            return self._access_token
-        
-        try:
-            url = config.DINGTALK_TOKEN_URL
-            payload = {
-                "appKey": self.client_id,
-                "appSecret": self.client_secret
-            }
-            
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            self._access_token = data['accessToken']
-            # token有效期7200秒，提前5分钟刷新
-            self._token_expires_at = time.time() + 7200 - 300
-            
-            print(f"✅ 成功获取access_token")
-            return self._access_token
-            
-        except Exception as e:
-            print(f"❌ 获取access_token失败: {e}")
-            raise
-    
+        """新版 API access_token（进程级共享缓存，线程安全）"""
+        return shared_get_access_token(
+            self.client_id,
+            self.client_secret,
+            api_base_url=config.DINGTALK_API_BASE_URL,
+            force_refresh=force_refresh,
+        )
+
     def get_corp_access_token(self, force_refresh: bool = False) -> str:
-        """
-        获取旧版OAPI access_token（用于企业内部应用主动调用topapi）
-        """
-        if not force_refresh and self._corp_access_token and time.time() < self._corp_token_expires_at:
-            return self._corp_access_token
-        
-        try:
-            params = {
-                "appkey": self.client_id,
-                "appsecret": self.client_secret
-            }
-            response = requests.get(config.DINGTALK_CORP_TOKEN_URL, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get('errcode') not in (0, None):
-                raise Exception(f"{data.get('errmsg')}")
-            
-            access_token = data.get('access_token')
-            if not access_token:
-                raise Exception(f"响应中缺少access_token: {data}")
-            
-            self._corp_access_token = access_token
-            expires_in = data.get('expires_in', 7200)
-            self._corp_token_expires_at = time.time() + expires_in - 300
-            
-            print("✅ 成功获取企业内部应用access_token")
-            return self._corp_access_token
-        except Exception as e:
-            print(f"❌ 获取企业内部应用access_token失败: {e}")
-            raise
-    
+        """旧版 OAPI access_token（用于企业内部应用主动调用 topapi）"""
+        return shared_get_corp_access_token(
+            self.client_id,
+            self.client_secret,
+            oapi_base_url=config.DINGTALK_OAPI_BASE_URL,
+            force_refresh=force_refresh,
+        )
+
     def get_userid_by_openid(self, open_id: str) -> Optional[str]:
         """
         根据openId查询企业内部userid
@@ -122,7 +73,7 @@ class DingTalkAPI:
         if userid:
             return userid
         
-        print(f"⚠️ 根据openId({open_id})获取userid失败: 未从任何接口获得结果")
+        logger.warning(f"⚠️ 根据openId({open_id})获取userid失败: 未从任何接口获得结果")
         return None
 
     def _get_userid_by_openid_openapi(self, open_id: str) -> Optional[str]:
@@ -157,7 +108,7 @@ class DingTalkAPI:
             if code and code != 'OK':
                 raise Exception(data.get('message') or data.get('msg') or code)
         except Exception as e:
-            print(f"⚠️ 使用contact/users/batchQuery获取openId({open_id})失败: {e}")
+            logger.warning(f"⚠️ 使用contact/users/batchQuery获取openId({open_id})失败: {e}")
         return None
 
     def _get_userid_by_openid_legacy(self, open_id: str) -> Optional[str]:
@@ -181,7 +132,7 @@ class DingTalkAPI:
                 self.cache_openid_userid(open_id, userid)
                 return userid
         except Exception as e:
-            print(f"⚠️ 旧版topapi根据openId({open_id})获取userid失败: {e}")
+            logger.warning(f"⚠️ 旧版topapi根据openId({open_id})获取userid失败: {e}")
         return None
     
     def download_file(self, download_code: str, file_name: str, save_dir: str, file_info: dict = None, session_webhook: str = None, robot_code: str = None) -> str:
@@ -202,8 +153,8 @@ class DingTalkAPI:
             access_token = self.get_access_token()
             
             # 方式1: 尝试使用 downloadCode 直接下载（旧版API）
-            print(f"📥 尝试下载文件: {file_name}")
-            print(f"🔑 downloadCode前20个字符: {download_code[:20]}...")
+            logger.info(f"📥 尝试下载文件: {file_name}")
+            logger.info(f"🔑 downloadCode前20个字符: {download_code[:20]}...")
             
             # 直接使用downloadCode作为下载链接（某些版本的钉钉）
             # downloadCode可能已经是完整的下载URL或包含了必要的token
@@ -215,12 +166,12 @@ class DingTalkAPI:
             # 方式-2: 使用 robotCode + downloadCode（正确方式！）
             if robot_code and download_code:
                 try:
-                    print(f"📡 方式-2: 使用 robotCode + downloadCode 下载")
-                    print(f"   robotCode: {robot_code[:20]}...")
+                    logger.info(f"📡 方式-2: 使用 robotCode + downloadCode 下载")
+                    logger.info(f"   robotCode: {robot_code[:20]}...")
                     
                     download_api = f"{config.DINGTALK_API_BASE_URL}/v1.0/robot/messageFiles/download"
                     
-                    print(f"📡 发送POST请求到: {download_api}")
+                    logger.info(f"📡 发送POST请求到: {download_api}")
                     response = requests.post(
                         download_api,
                         headers=headers,
@@ -231,12 +182,12 @@ class DingTalkAPI:
                         timeout=60
                     )
                     
-                    print(f"📡 响应状态: {response.status_code}")
+                    logger.info(f"📡 响应状态: {response.status_code}")
                     
                     if response.status_code == 200:
                         content_type = response.headers.get('Content-Type', '')
-                        print(f"📡 Content-Type: {content_type}")
-                        print(f"✓ 下载成功，文件大小: {len(response.content)} 字节")
+                        logger.info(f"📡 Content-Type: {content_type}")
+                        logger.info(f"✓ 下载成功，文件大小: {len(response.content)} 字节")
                         
                         # 检查是否是JSON错误响应
                         if 'application/json' in content_type:
@@ -245,7 +196,7 @@ class DingTalkAPI:
                                 # 可能返回的是下载链接
                                 if 'downloadUrl' in result or 'url' in result:
                                     download_url = result.get('downloadUrl') or result.get('url')
-                                    print(f"📥 获取到下载链接: {download_url[:50]}...")
+                                    logger.info(f"📥 获取到下载链接: {download_url[:50]}...")
                                     with requests.Session() as _s:
                                         _s.trust_env = False
                                         file_response = _s.get(download_url, timeout=60)
@@ -253,27 +204,27 @@ class DingTalkAPI:
                                     file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                                     return file_path
                                 elif 'errcode' in result and result['errcode'] != 0:
-                                    print(f"⚠️ 接口返回错误: {result}")
+                                    logger.warning(f"⚠️ 接口返回错误: {result}")
                                     raise Exception(f"下载失败: {result.get('errmsg', 'Unknown error')}")
                             except Exception as e:
-                                print(f"⚠️ JSON解析或处理失败: {e}")
+                                logger.warning(f"⚠️ JSON解析或处理失败: {e}")
                         else:
                             # 直接是文件内容
                             file_path = self._save_downloaded_file(response.content, file_name, save_dir)
                             return file_path
                     else:
-                        print(f"⚠️ 响应内容: {response.text[:200]}")
+                        logger.warning(f"⚠️ 响应内容: {response.text[:200]}")
                 except Exception as e:
-                    print(f"⚠️ 方式-2失败: {e}")
+                    logger.warning(f"⚠️ 方式-2失败: {e}")
             
             # 方式-1: 使用 session_webhook 下载（Stream模式专用）
             if session_webhook and download_code:
                 try:
-                    print(f"📡 方式-1: 使用 session_webhook 下载")
-                    print(f"   webhook: {session_webhook[:50]}...")
+                    logger.info(f"📡 方式-1: 使用 session_webhook 下载")
+                    logger.info(f"   webhook: {session_webhook[:50]}...")
                     
                     # 使用POST请求，downloadCode放在请求体中
-                    print(f"📡 发送POST请求到: {session_webhook}")
+                    logger.info(f"📡 发送POST请求到: {session_webhook}")
                     file_response = requests.post(
                         session_webhook,
                         json={'downloadCode': download_code},
@@ -281,20 +232,20 @@ class DingTalkAPI:
                         timeout=60
                     )
                     
-                    print(f"📡 响应状态: {file_response.status_code}")
+                    logger.info(f"📡 响应状态: {file_response.status_code}")
                     
                     # 检查响应内容
                     if file_response.status_code == 200:
                         content_type = file_response.headers.get('Content-Type', '')
-                        print(f"📡 Content-Type: {content_type}")
-                        print(f"✓ 下载成功，文件大小: {len(file_response.content)} 字节")
+                        logger.info(f"📡 Content-Type: {content_type}")
+                        logger.info(f"✓ 下载成功，文件大小: {len(file_response.content)} 字节")
                         
                         # 检查是否是JSON错误响应
                         if 'application/json' in content_type:
                             try:
                                 error_data = file_response.json()
                                 if 'errcode' in error_data and error_data['errcode'] != 0:
-                                    print(f"⚠️ 接口返回错误: {error_data}")
+                                    logger.warning(f"⚠️ 接口返回错误: {error_data}")
                                     raise Exception(f"下载失败: {error_data.get('errmsg', 'Unknown error')}")
                             except:
                                 pass
@@ -303,9 +254,9 @@ class DingTalkAPI:
                         file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                         return file_path
                     else:
-                        print(f"⚠️ 响应内容: {file_response.text[:200]}")
+                        logger.warning(f"⚠️ 响应内容: {file_response.text[:200]}")
                 except Exception as e:
-                    print(f"⚠️ 方式-1失败: {e}")
+                    logger.warning(f"⚠️ 方式-1失败: {e}")
             
             # 方式0: 使用 spaceId 和 fileId 下载（钉钉网盘文件）
             if file_info and file_info.get('spaceId') and file_info.get('fileId'):
@@ -313,24 +264,24 @@ class DingTalkAPI:
                     space_id = file_info.get('spaceId')
                     file_id = file_info.get('fileId')
                     
-                    print(f"📡 方式0: 使用 spaceId={space_id}, fileId={file_id}")
+                    logger.info(f"📡 方式0: 使用 spaceId={space_id}, fileId={file_id}")
                     
                     # 钉钉网盘文件下载API
                     download_url_api = f"{config.DINGTALK_API_BASE_URL}/v1.0/drive/spaces/{space_id}/files/{file_id}/download"
                     
-                    print(f"📡 请求下载地址: {download_url_api}")
+                    logger.info(f"📡 请求下载地址: {download_url_api}")
                     response = requests.get(download_url_api, headers=headers, timeout=10)
                     
-                    print(f"📡 响应状态: {response.status_code}")
+                    logger.info(f"📡 响应状态: {response.status_code}")
                     if response.status_code == 200:
                         result = response.json()
-                        print(f"✓ 获取下载信息成功: {result}")
+                        logger.info(f"✓ 获取下载信息成功: {result}")
                         
                         # 可能的返回字段
                         download_url = result.get('downloadUrl') or result.get('url') or result.get('downloadInfo', {}).get('url')
                         
                         if download_url:
-                            print(f"📥 正在从URL下载: {download_url[:50]}...")
+                            logger.info(f"📥 正在从URL下载: {download_url[:50]}...")
                             with requests.Session() as _s:
                                 _s.trust_env = False
                                 file_response = _s.get(download_url, timeout=60)
@@ -338,16 +289,16 @@ class DingTalkAPI:
                             file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                             return file_path
                     else:
-                        print(f"⚠️ 响应内容: {response.text}")
+                        logger.warning(f"⚠️ 响应内容: {response.text}")
                 except Exception as e:
-                    print(f"⚠️ 方式0失败: {e}")
+                    logger.warning(f"⚠️ 方式0失败: {e}")
             
             # 方式1: 使用媒体文件下载API
             try:
                 # 根据官方文档，应该使用媒体文件下载接口
                 download_url_api = f"{config.DINGTALK_API_BASE_URL}/v1.0/oauth2/userAccessToken"
                 
-                print(f"📡 方式1: 尝试获取媒体下载URL")
+                logger.info(f"📡 方式1: 尝试获取媒体下载URL")
                 
                 # 直接POST请求下载
                 download_api = f"{config.DINGTALK_API_BASE_URL}/v1.0/robot/messageFiles/download"
@@ -359,15 +310,15 @@ class DingTalkAPI:
                     timeout=10
                 )
                 
-                print(f"📡 响应状态: {response.status_code}")
+                logger.info(f"📡 响应状态: {response.status_code}")
                 if response.status_code == 200:
                     result = response.json()
-                    print(f"✓ 获取下载信息成功: {result}")
+                    logger.info(f"✓ 获取下载信息成功: {result}")
                     download_url = result.get('downloadUrl') or result.get('url')
                     
                     if download_url:
                         # 下载文件
-                        print(f"📥 正在从URL下载: {download_url[:50]}...")
+                        logger.info(f"📥 正在从URL下载: {download_url[:50]}...")
                         with requests.Session() as _s:
                             _s.trust_env = False
                             file_response = _s.get(download_url, timeout=60)
@@ -377,10 +328,10 @@ class DingTalkAPI:
                         file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                         return file_path
                 else:
-                    print(f"⚠️ 响应内容: {response.text}")
+                    logger.warning(f"⚠️ 响应内容: {response.text}")
                         
             except Exception as e:
-                print(f"⚠️ 方式1失败: {e}")
+                logger.warning(f"⚠️ 方式1失败: {e}")
             
             # 方式2: 尝试其他下载端点
             try:
@@ -390,7 +341,7 @@ class DingTalkAPI:
                 if response.status_code == 200:
                     download_url = response.json().get('downloadUrl')
                     if download_url:
-                        print(f"✓ 方式2成功获取下载地址")
+                        logger.info(f"✓ 方式2成功获取下载地址")
                         with requests.Session() as _s:
                             _s.trust_env = False
                             file_response = _s.get(download_url, timeout=60)
@@ -398,11 +349,11 @@ class DingTalkAPI:
                         file_path = self._save_downloaded_file(file_response.content, file_name, save_dir)
                         return file_path
             except Exception as e:
-                print(f"⚠️ 方式2失败: {e}")
+                logger.warning(f"⚠️ 方式2失败: {e}")
             
             # 方式3: downloadCode可能就是可访问的URL
             if download_code.startswith('http'):
-                print(f"✓ downloadCode本身是URL，直接下载")
+                logger.info(f"✓ downloadCode本身是URL，直接下载")
                 with requests.Session() as _s:
                     _s.trust_env = False
                     file_response = _s.get(download_code, headers=headers, timeout=60)
@@ -414,7 +365,7 @@ class DingTalkAPI:
             raise Exception(f"所有下载方式都失败，无法下载文件: {file_name}")
             
         except Exception as e:
-            print(f"❌ 下载文件失败: {e}")
+            logger.error(f"❌ 下载文件失败: {e}")
             raise
     
     def _save_downloaded_file(self, file_content: bytes, file_name: str, save_dir: str) -> str:
@@ -439,7 +390,7 @@ class DingTalkAPI:
         with open(file_path, 'wb') as f:
             f.write(file_content)
         
-        print(f"✅ 文件已保存到: {file_path}")
+        logger.info(f"✅ 文件已保存到: {file_path}")
         return file_path
     
     def upload_file(
@@ -465,27 +416,27 @@ class DingTalkAPI:
         try:
             access_token = self.get_corp_access_token()
             file_name = os.path.basename(file_path)
-            print(f"📤 正在上传文件[oapi]: {file_name}")
+            logger.info(f"📤 正在上传文件[oapi]: {file_name}")
             upload_url = f"{config.DINGTALK_OAPI_BASE_URL}/media/upload"
             with open(file_path, 'rb') as f:
                 files = {
                     'media': (file_name, f, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                 }
                 params = {'access_token': access_token, 'type': 'file'}
-                print(f"📡 使用企业内部应用上传: {upload_url}")
+                logger.info(f"📡 使用企业内部应用上传: {upload_url}")
                 response = requests.post(upload_url, files=files, params=params, timeout=60)
-            print(f"📡 响应状态: {response.status_code}")
+            logger.info(f"📡 响应状态: {response.status_code}")
             if response.status_code == 200:
                 result = response.json()
-                print(f"✓ 上传响应: {result}")
+                logger.info(f"✓ 上传响应: {result}")
                 media_id = result.get('media_id')
                 if media_id:
-                    print(f"✅ 文件上传成功，media_id: {media_id}")
+                    logger.info(f"✅ 文件上传成功，media_id: {media_id}")
                     return media_id, file_name
                 raise Exception(f"未返回media_id: {result}")
             raise Exception(f"{response.status_code}: {response.text[:200]}")
         except Exception as e:
-            print(f"❌ 上传文件失败: {e}")
+            logger.error(f"❌ 上传文件失败: {e}")
             raise
 
     def send_file_message(self, user_id: str, media_id: str, file_name: str, webhook: str = None) -> bool:
@@ -504,7 +455,7 @@ class DingTalkAPI:
         try:
             # 方式1: 使用webhook（Stream模式，推荐）
             if webhook:
-                print(f"📨 使用webhook发送文件...")
+                logger.info(f"📨 使用webhook发送文件...")
                 
                 file_message = {
                     "msgtype": "file",
@@ -522,19 +473,19 @@ class DingTalkAPI:
                     timeout=10
                 )
                 
-                print(f"📨 响应状态: {response.status_code}")
+                logger.info(f"📨 响应状态: {response.status_code}")
                 
                 if response.status_code == 200:
                     result = response.json()
                     if result.get('errcode') == 0:
-                        print(f"✅ 文件消息已发送给用户: {user_id}")
+                        logger.info(f"✅ 文件消息已发送给用户: {user_id}")
                         return True
                     else:
-                        print(f"⚠️ 发送失败: {result}")
+                        logger.warning(f"⚠️ 发送失败: {result}")
                         return False
             
             # 方式2: 通过机器人主动推送（不依赖传统通知）
-            print(f"⚠️ 未提供webhook，尝试由机器人主动发送文件")
+            logger.warning(f"⚠️ 未提供webhook，尝试由机器人主动发送文件")
             return self.send_robot_oto_message(
                 user_ids=user_id,
                 msg_key="sampleFile",
@@ -545,7 +496,7 @@ class DingTalkAPI:
             )
             
         except Exception as e:
-            print(f"❌ 发送文件消息失败: {e}")
+            logger.error(f"❌ 发送文件消息失败: {e}")
             return False
     
     def send_robot_oto_message(self, user_ids: Union[str, Sequence[str]], msg_key: str, msg_param: dict) -> bool:
@@ -581,31 +532,31 @@ class DingTalkAPI:
                 "msgParam": json.dumps(msg_param, ensure_ascii=False)
             }
             
-            print(f"\n{'='*70}")
-            print(f"📨 机器人主动推送")
-            print(f"{'='*70}")
-            print(f"接收用户: {target_user_ids}")
-            print(f"msgKey: {msg_key}")
-            print(f"msgParam: {msg_param}")
-            print(f"{'='*70}\n")
+            logger.info(f"\n{'='*70}")
+            logger.info(f"📨 机器人主动推送")
+            logger.info(f"{'='*70}")
+            logger.info(f"接收用户: {target_user_ids}")
+            logger.info(f"msgKey: {msg_key}")
+            logger.info(f"msgParam: {msg_param}")
+            logger.info(f"{'='*70}\n")
             
             response = requests.post(url, json=payload, headers=headers, timeout=10)
-            print(f"📨 响应状态: {response.status_code}")
-            print(f"📨 响应内容: {response.text}\n")
+            logger.info(f"📨 响应状态: {response.status_code}")
+            logger.info(f"📨 响应内容: {response.text}\n")
             
             if response.status_code == 200:
                 result = response.json() if response.text else {}
                 error_code = result.get('code')
                 if error_code in (None, '', 0, '0'):
-                    print(f"✅ 机器人消息发送成功: {target_user_ids}")
+                    logger.info(f"✅ 机器人消息发送成功: {target_user_ids}")
                     return True
-                print(f"❌ 机器人消息发送失败: {result}")
+                logger.error(f"❌ 机器人消息发送失败: {result}")
                 return False
             
-            print(f"❌ 机器人消息发送失败（HTTP {response.status_code}）")
+            logger.error(f"❌ 机器人消息发送失败（HTTP {response.status_code}）")
             return False
         except Exception as e:
-            print(f"❌ 机器人消息发送异常: {e}")
+            logger.error(f"❌ 机器人消息发送异常: {e}")
             return False
     
     def send_interactive_card(self, webhook: str, card_data: dict) -> bool:
@@ -620,8 +571,8 @@ class DingTalkAPI:
             是否发送成功
         """
         try:
-            print(f"📨 发送交互式卡片")
-            print(f"📨 卡片数据: {card_data}")
+            logger.info(f"📨 发送交互式卡片")
+            logger.info(f"📨 卡片数据: {card_data}")
             
             response = requests.post(
                 webhook,
@@ -630,22 +581,22 @@ class DingTalkAPI:
                 timeout=10
             )
             
-            print(f"📨 响应状态: {response.status_code}")
-            print(f"📨 响应内容: {response.text}")
+            logger.info(f"📨 响应状态: {response.status_code}")
+            logger.info(f"📨 响应内容: {response.text}")
             
             if response.status_code == 200:
                 result = response.json()
                 if result.get('errcode') == 0:
-                    print(f"✅ 交互式卡片已发送")
+                    logger.info(f"✅ 交互式卡片已发送")
                     return True
                 else:
-                    print(f"⚠️ 发送失败: {result}")
+                    logger.warning(f"⚠️ 发送失败: {result}")
                     return False
             
             return False
             
         except Exception as e:
-            print(f"❌ 发送交互式卡片失败: {e}")
+            logger.error(f"❌ 发送交互式卡片失败: {e}")
             return False
     
     def send_text_message(self, user_ids: Union[str, Sequence[str]], text: str) -> bool:
@@ -667,7 +618,7 @@ class DingTalkAPI:
             )
             
         except Exception as e:
-            print(f"❌ 发送文本消息失败: {e}")
+            logger.error(f"❌ 发送文本消息失败: {e}")
             return False
     
 
@@ -698,10 +649,10 @@ def cleanup_old_files(directory: str, days: int = 7, exclude: Optional[Sequence[
                 continue
             if os.path.isfile(entry_path):
                 os.remove(entry_path)
-                print(f"🗑️  已删除旧文件: {entry_path}")
+                logger.info(f"🗑️  已删除旧文件: {entry_path}")
             elif os.path.isdir(entry_path):
                 shutil.rmtree(entry_path, ignore_errors=True)
-                print(f"🗑️  已删除旧目录: {entry_path}")
+                logger.info(f"🗑️  已删除旧目录: {entry_path}")
     except Exception as e:
-        print(f"⚠️  清理文件时出错: {e}")
+        logger.warning(f"⚠️  清理文件时出错: {e}")
 

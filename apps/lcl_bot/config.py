@@ -82,7 +82,8 @@ BASE_DIR = os.getenv("LCL_BASE_DIR", str(PACKAGE_DIR)).strip() or str(PACKAGE_DI
 EXCEL_FILES_DIR = os.getenv("LCL_EXCEL_FILES_DIR", os.path.join(BASE_DIR, "Excel_Files"))
 TEMPLATE_FILES_DIR = os.getenv(
     "LCL_TEMPLATE_FILES_DIR",
-    os.path.join(BASE_DIR, "templates"),
+    # shared with pinxiang_bot: one copy of the Amazon manifest templates
+    str(MONOREPO_ROOT / "shared" / "amazon_templates"),
 )
 AMAZON_TEMPLATE_SOURCE_FILE = os.path.join(
     TEMPLATE_FILES_DIR,

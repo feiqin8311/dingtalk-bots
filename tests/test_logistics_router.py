@@ -39,8 +39,12 @@ def _load_router_module():
     lcl_pkg = types.ModuleType("lcl_bot")
     lcl_pkg.handlers = lcl_handlers_mod
 
+    cp_handler_cls = MagicMock()
+
     class _Loader:
+        # router loads both cp_bot and pinxiang_bot handler.py by file path through this hook
         def exec_module(self, mod):
+            mod.ShipmentQueryHandler = cp_handler_cls
             mod.PinxiangBotHandler = pinxiang_mod.PinxiangBotHandler
 
     class _Spec:
@@ -58,7 +62,6 @@ def _load_router_module():
             "settings": settings_mod,
             "dingtalk_stream": MagicMock(),
             "dingtalk_stream.chatbot": MagicMock(),
-            "handler": MagicMock(ShipmentQueryHandler=MagicMock()),
             "Bot.handler": MagicMock(PdfSplitBotHandler=MagicMock()),
             "Bot.runtime": MagicMock(collect_download_codes=lambda payload: payload.get("downloadCodes", [])),
             "Utils.dingtalk_api": MagicMock(),
@@ -72,7 +75,7 @@ def _load_router_module():
         sys.modules["dingtalk_stream"].ChatbotHandler = object
         sys.modules["dingtalk_stream"].AckMessage = SimpleNamespace(STATUS_OK="OK")
         with patch("importlib.util.spec_from_file_location", return_value=_Spec()):
-            with patch("importlib.util.module_from_spec", return_value=pinxiang_mod):
+            with patch("importlib.util.module_from_spec", side_effect=lambda _spec: types.ModuleType("app_handler")):
                 spec.loader.exec_module(module)
     return module
 
