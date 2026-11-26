@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -12,6 +13,33 @@ from pingyi_client import TrackEvent, TrackShipment
 
 DEFAULT_GATEWAY_BASE = "http://host.docker.internal:18743"
 _AGL_DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
+# 连续运输层失败达到阈值后本轮熔断；业务错误（缺号/无轨迹）不计入
+DEFAULT_CIRCUIT_FAIL_THRESHOLD = 3
+_DOWN_MARKERS = (
+    "timed out",
+    "timeout",
+    "unavailable",
+    "不可用",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "connection reset",
+    "connection refused",
+)
+
+
+class GatewayCircuitOpen(RuntimeError):
+    """网关连续失败，本轮不再打上游。"""
+
+
+def is_gateway_down_error(exc: BaseException) -> bool:
+    if isinstance(exc, GatewayCircuitOpen):
+        return False
+    if isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError)):
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _DOWN_MARKERS)
 
 
 def normalize_agl_time(raw: str) -> str:
@@ -46,6 +74,7 @@ class LogisticsGatewayClient:
         timeout_sec: float = 240,
         max_concurrent: int = 1,
         min_interval_sec: float = 0.0,
+        circuit_fail_threshold: int = DEFAULT_CIRCUIT_FAIL_THRESHOLD,
     ) -> None:
         if not base_url:
             raise ValueError("gateway base_url required")
@@ -59,6 +88,42 @@ class LogisticsGatewayClient:
         self._min_interval = max(0.0, float(min_interval_sec))
         self._pace_lock = threading.Lock()
         self._last_start = 0.0
+        self._fail_lock = threading.Lock()
+        self._consecutive_fails = 0
+        self._circuit_open = False
+        self._circuit_fail_threshold = max(1, int(circuit_fail_threshold))
+
+    @property
+    def circuit_open(self) -> bool:
+        with self._fail_lock:
+            return self._circuit_open
+
+    def _raise_if_open(self) -> None:
+        with self._fail_lock:
+            if self._circuit_open:
+                raise GatewayCircuitOpen(
+                    f"网关连续失败已熔断（{self._consecutive_fails} 次），本轮不再查询"
+                )
+
+    def _note_success(self) -> None:
+        with self._fail_lock:
+            if not self._circuit_open:
+                self._consecutive_fails = 0
+
+    def _note_failure(self, exc: BaseException) -> None:
+        if not is_gateway_down_error(exc):
+            return
+        with self._fail_lock:
+            self._consecutive_fails += 1
+            if (
+                self._consecutive_fails >= self._circuit_fail_threshold
+                and not self._circuit_open
+            ):
+                self._circuit_open = True
+                logging.getLogger("track_notify").warning(
+                    "gateway circuit open after %s consecutive failures",
+                    self._consecutive_fails,
+                )
 
     def query_longzhou(
         self,
@@ -124,19 +189,29 @@ class LogisticsGatewayClient:
     def _query_fba(
         self, payload: dict[str, Any], *, fallback_no: str
     ) -> TrackShipment | None:
+        self._raise_if_open()
         with self._sem:
+            self._raise_if_open()
             if self._min_interval > 0:
                 with self._pace_lock:
                     wait = self._min_interval - (time.monotonic() - self._last_start)
                     if wait > 0:
                         time.sleep(wait)
                     self._last_start = time.monotonic()
-            body = self._post_json("/api/fba/query", payload)
+            try:
+                body = self._post_json("/api/fba/query", payload)
+            except Exception as exc:
+                self._note_failure(exc)
+                raise
         if not body.get("success"):
             err = body.get("error") or str(body)
             if any(x in str(err) for x in ("不存在", "未找到", "无轨迹", "no track")):
+                self._note_success()
                 return None
-            raise RuntimeError(f"gateway fba/query failed: {err}")
+            fail = RuntimeError(f"gateway fba/query failed: {err}")
+            self._note_failure(fail)
+            raise fail
+        self._note_success()
 
         data = body.get("data") or {}
         if not isinstance(data, dict):

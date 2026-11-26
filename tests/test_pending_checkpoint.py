@@ -54,6 +54,32 @@ class PendingCheckpointTests(unittest.TestCase):
             self.assertEqual(store2.pending_count(), 0)
             store2.close()
 
+    def test_checkpoint_collapses_duplicate_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = TrackStateStore(Path(td) / "t.sqlite3")
+            items = [
+                ReportItem(
+                    shipment_key="AL0-1",
+                    event_key="lz:pod",
+                    message="old",
+                    user_ids=["u1"],
+                    detail="first",
+                ),
+                ReportItem(
+                    shipment_key="AL0-1",
+                    event_key="lz:pod",
+                    message="new",
+                    user_ids=["u1"],
+                    detail="second",
+                ),
+            ]
+            _checkpoint_bucket(store, items)
+            self.assertEqual(store.pending_count(), 1)
+            loaded = store.load_pending_items()
+            self.assertEqual(loaded[0]["message"], "new")
+            self.assertEqual(loaded[0]["detail"], "second")
+            store.close()
+
     def test_discard_pending_if_stale_same_day_keeps(self):
         with tempfile.TemporaryDirectory() as td:
             store = TrackStateStore(Path(td) / "t.sqlite3")
@@ -108,7 +134,7 @@ class PendingCheckpointTests(unittest.TestCase):
 
 
 class ScheduleAndDeliverTests(unittest.TestCase):
-    def test_next_run_at_mon_wed_0700_and_catchup(self):
+    def test_next_run_at_mon_wed_1000_and_catchup(self):
         import importlib.util
 
         spec = importlib.util.spec_from_file_location("track_notify_main", APP / "main.py")
@@ -117,17 +143,17 @@ class ScheduleAndDeliverTests(unittest.TestCase):
         spec.loader.exec_module(mod)
         SCHEDULE_HOUR, _next_run_at = mod.SCHEDULE_HOUR, mod._next_run_at
 
-        self.assertEqual(SCHEDULE_HOUR, 7)
-        mon_before = datetime(2026, 8, 3, 6, 59, 0, tzinfo=CST)
+        self.assertEqual(SCHEDULE_HOUR, 10)
+        mon_before = datetime(2026, 8, 3, 9, 59, 0, tzinfo=CST)
         self.assertEqual(
             _next_run_at(mon_before, last_run_ymd=None),
-            datetime(2026, 8, 3, 7, 0, 0, tzinfo=CST),
+            datetime(2026, 8, 3, 10, 0, 0, tzinfo=CST),
         )
-        mon_late = datetime(2026, 8, 3, 7, 5, 0, tzinfo=CST)
+        mon_late = datetime(2026, 8, 3, 10, 5, 0, tzinfo=CST)
         self.assertEqual(_next_run_at(mon_late, last_run_ymd=None), mon_late)
         self.assertEqual(
             _next_run_at(mon_late, last_run_ymd="2026-08-03"),
-            datetime(2026, 8, 5, 7, 0, 0, tzinfo=CST),
+            datetime(2026, 8, 5, 10, 0, 0, tzinfo=CST),
         )
 
     def test_deliver_defers_mark_until_all_recipients_ok(self):
