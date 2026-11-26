@@ -46,6 +46,7 @@ COPY apps/split_bot /app/apps/split_bot
 COPY apps/logistics_bot /app/apps/logistics_bot
 COPY apps/pinxiang_bot /app/apps/pinxiang_bot
 COPY apps/lcl_bot /app/apps/lcl_bot
+COPY apps/fba_label_bot /app/apps/fba_label_bot
 COPY apps/track_notify /app/apps/track_notify
 RUN mkdir -p \
     /app/files \

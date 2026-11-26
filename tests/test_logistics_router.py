@@ -65,6 +65,8 @@ def _load_router_module():
             "pinxiang_bot_handler": pinxiang_mod,
             "lcl_bot": lcl_pkg,
             "lcl_bot.handlers": lcl_handlers_mod,
+            "fba_label_bot": types.ModuleType("fba_label_bot"),
+            "fba_label_bot.handler": SimpleNamespace(FbaLabelBotHandler=MagicMock(side_effect=_make_handler)),
         },
     ):
         sys.modules["dingtalk_stream"].ChatbotHandler = object
@@ -104,6 +106,21 @@ class LogisticsRouterTests(unittest.TestCase):
 
     def test_menu_choice_selects_lcl_branch(self):
         self.assertEqual(self.router._route({"text": {"content": "4"}}, user_id="u1"), "select_lcl")
+
+    def test_menu_choice_selects_fba_branch(self):
+        self.assertEqual(self.router._route({"text": {"content": "5"}}, user_id="u1"), "select_fba")
+
+    def test_fba_branch_keeps_pdf_uploads(self):
+        self.router._set_branch("u1", "fba")
+        self.assertEqual(
+            self.router._route({"downloadCodes": ["a", "b"], "text": {"content": ""}}, user_id="u1"),
+            "fba",
+        )
+        self.assertEqual(self.router._route({"text": {"content": "你好"}}, user_id="u1"), "fba")
+
+    def test_fba_branch_can_switch_menu(self):
+        self.router._set_branch("u1", "fba")
+        self.assertEqual(self.router._route({"text": {"content": "2"}}, user_id="u1"), "select_split")
 
     def test_lcl_branch_keeps_messages(self):
         self.router._set_branch("u1", "lcl")

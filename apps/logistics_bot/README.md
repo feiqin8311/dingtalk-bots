@@ -10,11 +10,13 @@ Unified DingTalk Stream bot for Logistics department workflows.
 - PDF/label split: upload PDF + Excel, or send `标签拆分` / `拆分`.
 - No-FC-split packing (不分仓拼箱): menu `3` → `apps/pinxiang_bot`.
 - FC-split packing (分仓拼箱 / LCL): menu `4` → `apps/lcl_bot` (from dingtalk-lcl-bot).
+- FBA label cleanup (FBA 箱唛清理): menu `5` → `apps/fba_label_bot`.
 
 - CP 发货单核对：发送 `SP...` 发货单号。
 - PDF/标签拆分：上传 PDF + Excel。
 - 不分仓拼箱：菜单 `3`。
 - 分仓拼箱：菜单 `4`（原 lcl-bot）。
+- FBA 箱唛清理：菜单 `5`，上传一个或多个 PDF，逐个回传「-已处理」PDF。
 
 ## Routing / 路由
 
@@ -23,12 +25,14 @@ Unified DingTalk Stream bot for Logistics department workflows.
 2. 标签/PDF 拆分
 3. 不分仓拼箱
 4. 分仓拼箱
+5. FBA 箱唛清理
 ```
 
 1. Reply `1` → CP  
 2. Reply `2` → split  
 3. Reply `3` → pinxiang  
 4. Reply `4` → lcl  
+5. Reply `5` → fba (PDF 箱唛清理)  
 5. Branch selected: messages stay on that branch  
 6. Reply `重置` → clear branch (+ lcl workflow if leaving 4)
 

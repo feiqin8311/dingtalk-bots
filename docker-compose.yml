@@ -54,6 +54,7 @@ services:
       - ./apps/split_bot:/app/apps/split_bot
       - ./apps/pinxiang_bot:/app/apps/pinxiang_bot
       - ./apps/lcl_bot:/app/apps/lcl_bot
+      - ./apps/fba_label_bot:/app/apps/fba_label_bot
       - ./apps/track_notify:/app/apps/track_notify
       - ./files:/app/files:ro
       - ./apps/cp_bot/downloads:/app/apps/cp_bot/downloads
