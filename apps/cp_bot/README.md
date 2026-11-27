@@ -1,10 +1,10 @@
 # Dingtalk-Cp-Bot
 
-> Monorepo note: this app is maintained under `/home/yida/Project/dingtalk-bots`.
-> Prefer running Docker from the monorepo root with `docker compose up -d --build`.
+> Monorepo note: this app is maintained under `/Users/kerden/Projects/yida/dingtalk-bots`.
+> Prefer running Docker from the monorepo root with `docker compose --profile legacy up -d --build dingtalk-cp-bot`.
 >
-> 单仓库说明：本应用维护于 `/home/yida/Project/dingtalk-bots`。
-> Docker 推荐从单仓库根目录执行 `docker compose up -d --build`。
+> 单仓库说明：本应用维护于 `/Users/kerden/Projects/yida/dingtalk-bots`。
+> Docker 推荐从单仓库根目录执行 `docker compose --profile legacy up -d --build dingtalk-cp-bot`。
 
 钉钉企业机器人：接收发货单号（`SP...`），调用领星查询发货数据，下载 FBA PDF，OCR 识别后做目的地核对并回复结果。
 
@@ -29,9 +29,8 @@
 ├── config.py
 ├── address_book_source.py
 ├── env.example
-├── requirements.txt
+├── requirements.lock
 ├── tests/
-├── Dockerfile
 ├── docker-compose.yml
 ├── downloads/
 └── README.md
@@ -43,7 +42,7 @@
 
 ## 环境要求
 
-- Python 3.11+
+- Python 3.11
 - MySQL 5.7+/8.0+
 - 可访问：
   - 钉钉 Stream
@@ -60,13 +59,13 @@
 1. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.lock
 ```
 
 2. 准备配置
 
 ```bash
-cp env.example .env
+cp apps/cp_bot/env.example apps/cp_bot/.env
 ```
 
 至少填写：
@@ -147,13 +146,13 @@ CREATE TABLE IF NOT EXISTS fact_dingtalk_bot_call_log (
 5. 启动
 
 ```bash
-python3 app.py
+python -m apps.cp_bot.app
 ```
 
 ## Docker 启动
 
 ```bash
-docker compose up -d --build
+docker compose --profile legacy up -d --build dingtalk-cp-bot
 ```
 
 注意：

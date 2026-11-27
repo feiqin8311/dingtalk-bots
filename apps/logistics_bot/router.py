@@ -1,61 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import logging
 import re
-import sys
 import json
 import threading
 import urllib.request
 import uuid
-from pathlib import Path
 from typing import Literal, Tuple
 
 import dingtalk_stream
 from dingtalk_stream import AckMessage
 
-from settings import ROOT_DIR, LogisticsBotConfig
+from apps.logistics_bot.settings import ROOT_DIR, LogisticsBotConfig
 
 # branch selection must survive process restart (was pure memory → menu after upload)
 _BRANCH_STATE_PATH = ROOT_DIR / "apps" / "logistics_bot" / ".state" / "selected_branch.json"
 _VALID_BRANCHES = frozenset({"cp", "split", "pinxiang", "lcl", "fba"})
 
 
-APPS_DIR = ROOT_DIR / "apps"
-CP_APP_DIR = APPS_DIR / "cp_bot"
-SPLIT_APP_DIR = APPS_DIR / "split_bot"
-PINXIANG_APP_DIR = APPS_DIR / "pinxiang_bot"
-
-# cp_bot / split_bot / pinxiang_bot use flat sibling imports (`import config`,
-# `from Bot.handler ...`), so their dirs must be on sys.path. Order no longer
-# matters: the two clashing top-level `handler.py` files (cp, pinxiang) are
-# loaded by file path under unique names below, never as bare `handler`.
-# apps/ itself is for the real packages (lcl_bot, fba_label_bot).
-for _path in (str(APPS_DIR), str(SPLIT_APP_DIR), str(CP_APP_DIR)):
-    if _path not in sys.path:
-        sys.path.insert(0, _path)
-
-
-def _load_app_module(alias: str, file_path: Path):
-    spec = importlib.util.spec_from_file_location(alias, file_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {file_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[alias] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-ShipmentQueryHandler = _load_app_module("cp_bot_handler", CP_APP_DIR / "handler.py").ShipmentQueryHandler
-PinxiangBotHandler = _load_app_module("pinxiang_bot_handler", PINXIANG_APP_DIR / "handler.py").PinxiangBotHandler
-
-from Bot.handler import PdfSplitBotHandler  # type: ignore  # noqa: E402
-from Bot.runtime import collect_download_codes  # type: ignore  # noqa: E402
-from Utils.dingtalk_api import get_token, send_robot_private_text_message  # type: ignore  # noqa: E402
-from shared.call_log import ProjectCallLogStore  # noqa: E402
-from lcl_bot.handlers import WorkflowBotHandler as LclBotHandler  # type: ignore  # noqa: E402
-from fba_label_bot.handler import FbaLabelBotHandler  # type: ignore  # noqa: E402
+from apps.cp_bot.handler import ShipmentQueryHandler
+from apps.pinxiang_bot.handler import PinxiangBotHandler
+from apps.split_bot.Bot.handler import PdfSplitBotHandler
+from apps.split_bot.Bot.runtime import collect_download_codes
+from apps.split_bot.Utils.dingtalk_api import get_token, send_robot_private_text_message
+from apps.lcl_bot.handlers import WorkflowBotHandler as LclBotHandler
+from apps.fba_label_bot.handler import FbaLabelBotHandler
+from shared.call_log import ProjectCallLogStore
 
 
 RouteName = Literal[

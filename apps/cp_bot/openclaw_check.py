@@ -20,13 +20,11 @@ def _find_repo_root(start: Path) -> Path:
 
 
 ROOT_DIR = _find_repo_root(Path(__file__).resolve().parent)
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
-import config
+import apps.cp_bot.config as config
 from shared.logging import setup_logger
-from handler import ShipmentQueryHandler, _extract_shipment_sns, _summarize_lingxing_response
-from shipment_service import fetch_shipment_detail_with_fallback
+from apps.cp_bot.handler import ShipmentQueryHandler, _extract_shipment_sns, _summarize_lingxing_response
+from apps.cp_bot.shipment_service import fetch_shipment_detail_with_fallback
 
 
 def _parse_args() -> argparse.Namespace:

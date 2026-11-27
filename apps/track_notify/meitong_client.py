@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from pingyi_client import TrackEvent, TrackShipment
+from apps.track_notify.pingyi_client import TrackEvent, TrackShipment
 
 
 DEFAULT_BASE_URL = "https://www.szaaf.com"

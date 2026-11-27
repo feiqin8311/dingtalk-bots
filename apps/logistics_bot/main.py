@@ -14,13 +14,11 @@ def _find_repo_root(start: Path) -> Path:
 
 
 ROOT_DIR = _find_repo_root(Path(__file__).resolve().parent)
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 import dingtalk_stream
 
-from settings import load_config_from_env
-from router import LogisticsRouter
+from apps.logistics_bot.settings import load_config_from_env
+from apps.logistics_bot.router import LogisticsRouter
 from shared.logging import setup_logger
 from shared.stream_client import ResilientDingTalkStreamClient
 
@@ -32,7 +30,7 @@ _TRACK_NOTIFY_HEALTHY_RUN_SEC = 10 * 60
 
 
 def _start_track_notify_daemon(logger) -> None:
-    """Mon/Wed 10:00 轨迹查询：子进程跑，避免与 logistics_bot 的 settings 模块名冲突。
+    """Mon/Wed 10:00 轨迹查询：子进程跑，让定时任务和 Stream 独立运行。
 
     子进程退出后按指数退避自动重启（30s → 最长 30min），否则调度会静默停掉。
     """
@@ -49,9 +47,8 @@ def _start_track_notify_daemon(logger) -> None:
         while True:
             started = time.monotonic()
             try:
-                # 独立解释器：track_notify/settings.py 不会被 logistics_bot.settings 挡住
                 proc = subprocess.Popen(
-                    [sys.executable, str(track_main_path), "--daemon"],
+                    [sys.executable, "-m", "apps.track_notify.main", "--daemon"],
                     cwd=str(ROOT_DIR),
                 )
                 code = proc.wait()

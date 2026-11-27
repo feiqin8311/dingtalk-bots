@@ -22,7 +22,7 @@ def _workbook_bytes() -> bytes:
 
 class AddressBookSourceTests(unittest.TestCase):
     def test_local_path_loads_workbook_from_filesystem(self):
-        import address_book_source
+        import apps.cp_bot.address_book_source as address_book_source
 
         path = Path("/tmp/address-book-source-test.xlsx")
         path.write_bytes(_workbook_bytes())
@@ -80,7 +80,7 @@ class AddressBookSourceTests(unittest.TestCase):
                 "smb.SMBConnection": fake_smb_connection_module,
             },
         ):
-            import address_book_source
+            import apps.cp_bot.address_book_source as address_book_source
 
             result = address_book_source.open_address_book_workbook(
                 path="smb://192.168.0.45/供应链管理/2 物流发货管理/17.单证数据表维护/全站点地址.xlsx",

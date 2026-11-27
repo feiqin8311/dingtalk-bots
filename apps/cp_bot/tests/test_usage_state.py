@@ -1,6 +1,6 @@
 import unittest
 
-from usage_state import InMemoryRuntimeState, normalize_shipment_sns
+from apps.cp_bot.usage_state import InMemoryRuntimeState, normalize_shipment_sns
 
 
 class UsageStateTests(unittest.TestCase):

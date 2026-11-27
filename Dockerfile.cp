@@ -17,14 +17,16 @@ RUN cp /etc/apt/sources.list.d/debian.sources /tmp/debian.sources.bak \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY requirements.lock /app/requirements.lock
 RUN pip install --upgrade pip -i ${PIP_INDEX_URL} \
-    && (pip install -r /app/requirements.txt -i ${PIP_INDEX_URL} \
-        || pip install -r /app/requirements.txt -i ${PIP_FALLBACK_INDEX_URL})
+    && (pip install -r /app/requirements.lock -i ${PIP_INDEX_URL} \
+        || pip install -r /app/requirements.lock -i ${PIP_FALLBACK_INDEX_URL})
 
-COPY apps/cp_bot/ /app/
+COPY apps/__init__.py /app/apps/__init__.py
+COPY apps/cp_bot/ /app/apps/cp_bot/
 COPY shared /app/shared
+ENV DOWNLOAD_DIR=/app/downloads
 RUN mkdir -p /app/downloads
 
-CMD ["python", "app.py"]
+CMD ["python", "-m", "apps.cp_bot.app"]
 

@@ -7,10 +7,8 @@ from pathlib import Path
 import pymupdf
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "apps") not in sys.path:
-    sys.path.insert(0, str(ROOT / "apps"))
 
-from fba_label_bot.cleaner import clean_pdf_bytes, output_file_name  # noqa: E402
+from apps.fba_label_bot.cleaner import clean_pdf_bytes, output_file_name  # noqa: E402
 
 
 class FbaLabelCleanerTests(unittest.TestCase):

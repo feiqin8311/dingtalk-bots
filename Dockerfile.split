@@ -5,15 +5,18 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.lock .
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_FALLBACK_INDEX_URL=https://pypi.org/simple
 RUN pip install --no-cache-dir \
-    --default-timeout=300 \
-    --retries=10 \
-    -i https://mirrors.aliyun.com/pypi/simple/ \
-    -r requirements.txt
+    -i ${PIP_INDEX_URL} -r requirements.lock \
+    || pip install --no-cache-dir -i ${PIP_FALLBACK_INDEX_URL} -r requirements.lock
 
-COPY apps/split_bot/ /app/
+COPY apps/__init__.py /app/apps/__init__.py
+COPY apps/split_bot/ /app/apps/split_bot/
 COPY shared /app/shared
 
-CMD ["python", "main.py"]
+ENV PDF_SPLIT_WORKSPACE=/app/.bot-workspace
+
+CMD ["python", "-m", "apps.split_bot.main"]
 

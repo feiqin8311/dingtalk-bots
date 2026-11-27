@@ -17,11 +17,9 @@ def _find_repo_root(start: Path) -> Path:
 
 
 ROOT_DIR = _find_repo_root(Path(__file__).resolve().parent)
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
-from pdf_zip_bot import process_pdf_to_zip
-from pdf_zip_bot.rules import SplitRule
+from apps.split_bot.pdf_zip_bot import process_pdf_to_zip
+from apps.split_bot.pdf_zip_bot.rules import SplitRule
 from shared.dedup import MessageDeduplicator
 
 

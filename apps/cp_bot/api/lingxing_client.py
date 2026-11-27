@@ -9,9 +9,7 @@ including authentication, signature generation, and common operations.
 
 from __future__ import annotations
 
-import base64
 import copy
-import hashlib
 import os
 import time
 from datetime import datetime, timedelta
@@ -28,29 +26,7 @@ except ImportError:
     def json_dumps(obj):
         return json.dumps(obj, sort_keys=True).encode()
 
-from Crypto.Cipher import AES
-
-BLOCK_SIZE = 16  # Bytes
-
-
-def _do_pad(text: str) -> str:
-    return text + (BLOCK_SIZE - len(text) % BLOCK_SIZE) * chr(BLOCK_SIZE - len(text) % BLOCK_SIZE)
-
-
-def _aes_encrypt(key: str, data: str) -> str:
-    key_bytes = key.encode("utf-8")
-    data = _do_pad(data)
-    cipher = AES.new(key_bytes, AES.MODE_ECB)
-    result = cipher.encrypt(data.encode())
-    encode_str = base64.b64encode(result)
-    return encode_str.decode("utf-8")
-
-
-def _md5_encrypt(text: str) -> str:
-    md = hashlib.md5()
-    md.update(text.encode("utf-8"))
-    return md.hexdigest()
-
+from shared.lingxing import fetch_access_token, format_params, generate_sign
 
 class HttpBase:
     """Base HTTP client with async support."""
@@ -104,25 +80,11 @@ class SignBase:
 
     @classmethod
     def generate_sign(cls, encrypt_key: str, request_params: dict) -> str:
-        canonical_querystring = cls.format_params(request_params)
-        md5_str = _md5_encrypt(canonical_querystring).upper()
-        return _aes_encrypt(encrypt_key, md5_str)
+        return generate_sign(encrypt_key, request_params, serialize=lambda value: json_dumps(value).decode())
 
     @classmethod
     def format_params(cls, request_params: Union[None, dict] = None) -> str:
-        if not request_params or not isinstance(request_params, dict):
-            return ""
-        canonical_strs = []
-        sort_keys = sorted(request_params.keys())
-        for key in sort_keys:
-            value = request_params[key]
-            if value == "":
-                continue
-            if isinstance(value, (dict, list)):
-                canonical_strs.append(f"{key}={json_dumps(value).decode()}")
-            else:
-                canonical_strs.append(f"{key}={value}")
-        return "&".join(canonical_strs)
+        return format_params(request_params, serialize=lambda value: json_dumps(value).decode())
 
 
 class LingXingClient:
@@ -168,13 +130,7 @@ class LingXingClient:
     async def _fetch_access_token(self) -> str:
         """Fetch access token from token server."""
         ssl = None if self.ssl_verify else False
-        async with aiohttp.ClientSession(trust_env=True) as session:
-            async with session.post(self.token_url, json={"api_key": self.token_key}, ssl=ssl) as resp:
-                token_resp = await resp.json()
-        access_token = token_resp.get("access_token")
-        if not access_token:
-            raise RuntimeError(f"获取领星 access_token 失败: {token_resp}")
-        return access_token
+        return await fetch_access_token(self.token_url, self.token_key, ssl=ssl)
 
     async def _request(
         self,

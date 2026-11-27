@@ -27,7 +27,7 @@
 
 ## 依赖
 
-- monorepo `requirements.txt` 已含 `pandas`
+- monorepo `requirements.lock` 已含 `pandas`
 - 领星删单用本仓库 `lingxing_api.py`（`LINGXING_*`）
 
 ## 注意

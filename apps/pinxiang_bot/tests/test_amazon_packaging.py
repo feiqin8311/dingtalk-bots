@@ -11,19 +11,14 @@ import unittest
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parents[1]
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
-from amazon_packaging import (  # noqa: E402
+from apps.pinxiang_bot.amazon_packaging import (  # noqa: E402
     expand_packing_rows_to_boxes,
     fill_amazon_packaging_file,
     is_amazon_packaging_workbook,
 )
-from amazon_export import CM_TO_INCH, KG_TO_LB  # noqa: E402
-from packing import PackingRow  # noqa: E402
-
-REF = Path("/Users/kerden/Desktop/不分仓拼箱/参考表格/EZARC 美国 AMP 2SKU拼箱数据.xlsx")
-
+from apps.pinxiang_bot.amazon_export import CM_TO_INCH, KG_TO_LB  # noqa: E402
+from apps.pinxiang_bot.packing import PackingRow  # noqa: E402
 
 class AmazonPackagingTests(unittest.TestCase):
     def test_expand_boxes(self):
@@ -53,18 +48,26 @@ class AmazonPackagingTests(unittest.TestCase):
         self.assertEqual(boxes[0].width_in, 30.0)
         self.assertEqual(boxes[0].height_in, 20.0)
 
-    @unittest.skipUnless(REF.is_file(), "reference amazon packaging file missing")
     def test_fill_reference_shell(self):
-        # 用参考文件当壳（已有 SKU 行），用标准拼箱行重填
+        from openpyxl import Workbook, load_workbook
+
         rows = [
             PackingRow("青山湖仓库", "80376351F1", "80376351F1", 180, 60, 3, 17.5, 54, 31, 18, "原箱-整数部分"),
             PackingRow("青山湖仓库", "80376351F1", "80376351F1", 55, 55, 1, 17.0, 54, 30, 17, "余数改箱"),
             PackingRow("青山湖仓库", "801905N", "801905", 20, 20, 1, 9.0, 25, 34, 24, "不足一箱改箱"),
         ]
         with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "packaging.xlsx"
             out = Path(tmp) / "filled.xlsx"
-            fill_amazon_packaging_file(REF, rows, out)
-            from openpyxl import load_workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "包装箱包装信息"
+            ws.cell(6, 1, "801905")
+            ws.cell(7, 1, "80376351F1")
+            ws.cell(8, 1, "包装箱名称")
+            wb.save(src)
+            wb.close()
+            fill_amazon_packaging_file(src, rows, out)
 
             wb = load_workbook(out, data_only=True)
             ws = wb["包装箱包装信息"]

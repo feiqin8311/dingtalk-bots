@@ -1,6 +1,6 @@
 import unittest
 
-from address_matching import AddressRecord, score_address_candidate
+from apps.cp_bot.address_matching import AddressRecord, score_address_candidate
 
 
 class AddressMatchingTests(unittest.TestCase):

@@ -64,7 +64,7 @@ services:
       - ./apps/lcl_bot/Workflow_State:/app/apps/lcl_bot/Workflow_State
       - ./apps/logistics_bot/.state:/app/apps/logistics_bot/.state
       - ./apps/track_notify/.state:/app/apps/track_notify/.state
-    command: ["python", "apps/logistics_bot/main.py"]
+    command: ["python", "-m", "apps.logistics_bot.main"]
 
   dingtalk-cp-bot:
     profiles: ["legacy"]
@@ -85,7 +85,7 @@ services:
     volumes:
       - ./apps/cp_bot/downloads:/app/downloads
       - ./files:/app/files:ro
-    command: ["python", "app.py"]
+    command: ["python", "-m", "apps.cp_bot.app"]
 
   dingtalk-split-bot:
     profiles: ["legacy"]

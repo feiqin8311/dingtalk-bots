@@ -12,12 +12,12 @@ Use this skill for two related surfaces:
 - Maintain the `dingtalk-split-bot` repository: a DingTalk Stream robot that receives one PDF and one Excel workbook, previews or executes supplier-based PDF splitting, then sends a ZIP back through DingTalk.
 - Run the bundled local splitter for one PDF plus a 3-column rule table.
 
-Source code is authoritative. Read `/home/yida/Project/dingtalk-split-bot/AGENTS.md` and the project memory before meaningful maintenance work.
+Source code is authoritative. Read `/Users/kerden/Projects/yida/dingtalk-bots/apps/split_bot/AGENTS.md` and the project memory before meaningful maintenance work.
 
 ## Repository Workflow
 
-1. Read `/home/yida/Project/ai-memory/AGENTS.md`.
-2. Read `/home/yida/Project/ai-memory/projects/dingtalk-split-bot/index.md`.
+1. Read `repository documentation/AGENTS.md`.
+2. Read `the repository source and current README`.
 3. Read only the relevant memory files, usually `architecture.md`, `business-logic.md`, `operations.md`, `data-model.md`, or `api-map.md`.
 4. Inspect the implementing source files before changing behavior.
 5. Keep changes scoped and update project memory after meaningful behavior or operations changes.
@@ -62,7 +62,7 @@ Source code is authoritative. Read `/home/yida/Project/dingtalk-split-bot/AGENTS
 Local split:
 
 ```bash
-python skills/pdf-zip-splitter/scripts/pdf_split_zip.py source.pdf rules.txt --output-dir output
+python apps/split_bot/skills/pdf-zip-splitter/scripts/pdf_split_zip.py source.pdf rules.txt --output-dir output
 ```
 
 Run all tests:
@@ -81,7 +81,7 @@ Run the bot locally:
 
 ```bash
 cp env.example .env
-python main.py
+python -m apps.split_bot.main
 ```
 
 Docker:

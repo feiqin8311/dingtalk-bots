@@ -22,6 +22,7 @@ apps/          各业务分支（见上表）
 shared/        跨应用基础设施
   stream_client.py     钉钉 Stream 长连接（断线重连、日志、任务管理）
   dingtalk_token.py    钉钉 access_token 进程级缓存（新版 API + 旧版 OAPI）
+  lingxing.py          领星签名与 token 请求
   call_log.py          MySQL 调用日志
   amazon_templates/    Amazon Manifest 模板（拼箱两个分支共用）
 files/         从共享盘同步的业务 Excel（不入库），见 files/README.md
@@ -38,19 +39,19 @@ tests/         跨应用测试（路由、轨迹、分仓拼箱、共享模块�
 
 ```bash
 uv venv -p 3.11 .venv
-uv pip install -p .venv -r requirements.txt pytest pyyaml
+uv pip install -p .venv -r requirements.lock pytest
 PYTHON=.venv/bin/python scripts/run_tests.sh
 ```
 
-`scripts/run_tests.sh` 依次跑根目录和各 app 的测试。各 app 的测试必须在自己目录下跑：cp_bot 与 pinxiang_bot 都有顶层 `handler.py`，logistics_bot 与 track_notify 都有 `settings.py`，放进同一个 pytest 进程会导错模块。CI（`.github/workflows/tests.yml`）跑的是同一个脚本。
+本地和 GitHub Actions 都调用 `scripts/run_tests.sh`，在一个 pytest 进程中运行全库测试。统一入口：`python -m apps.logistics_bot.main`。
 
-依赖在 `requirements.txt` 中全部锁定精确版本；升级时改版本号并跑完测试。
+在 `requirements.txt` 修改直接依赖，然后用 `uv pip compile --universal --python-version 3.11 requirements.txt -o requirements.lock` 更新锁文件并跑测试。CI 和镜像都用锁文件安装直接与传递依赖。
 
 ## 部署
 
 ```bash
 ./deploy/deploy.sh            # 只改代码：rsync + 重启，十几秒
-./deploy/deploy.sh --rebuild  # 改了 requirements.txt：重建镜像
+./deploy/deploy.sh --rebuild  # 依赖或 Docker 入口变更：重建镜像
 ```
 
 详见 [deploy/README.md](deploy/README.md)。旧的独立容器（`dingtalk-cp-bot`、`dingtalk-split-bot`）放在 compose 的 `legacy` profile 里，默认不启动。

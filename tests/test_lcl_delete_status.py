@@ -6,13 +6,11 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "apps") not in sys.path:
-    sys.path.insert(0, str(ROOT / "apps"))
 
 
 class LclDeleteStatusTest(unittest.TestCase):
     def setUp(self) -> None:
-        from lcl_bot.state_manager import StateManager, WorkflowState
+        from apps.lcl_bot.state_manager import StateManager, WorkflowState
 
         self.WorkflowState = WorkflowState
         self._tmp = tempfile.TemporaryDirectory()

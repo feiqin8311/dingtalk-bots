@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from pingyi_client import TrackEvent, TrackShipment
+from apps.track_notify.pingyi_client import TrackEvent, TrackShipment
 
 DEFAULT_GATEWAY_BASE = "http://host.docker.internal:18743"
 _AGL_DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")

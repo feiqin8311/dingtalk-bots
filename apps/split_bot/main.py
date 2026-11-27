@@ -15,12 +15,10 @@ def _find_repo_root(start: Path) -> Path:
 
 
 ROOT_DIR = _find_repo_root(Path(__file__).resolve().parent)
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 import dingtalk_stream
 
-from Bot.handler import PdfSplitBotHandler
+from apps.split_bot.Bot.handler import PdfSplitBotHandler
 from shared.env import load_env_files
 from shared.logging import setup_logger
 from shared.stream_client import ResilientDingTalkStreamClient

@@ -13,7 +13,7 @@ The source code is the highest authority. Read current files before making claim
 
 ## First Steps
 
-1. Inspect `AGENTS.md` first. It points to external project memory under `/home/yida/Project/ai-memory/projects/dingtalk-bots/`.
+1. Inspect `AGENTS.md` first. It points to external project memory under `repository documentation`.
 2. Read the smallest useful source set:
    - `README.md` for setup and current behavior.
    - `app.py` for startup.
@@ -71,8 +71,8 @@ Do not expose the real SMB password in responses or generated docs.
 When the logistics OpenClaw agent receives one or more shipment numbers like `SP260421012`, run the one-shot checker instead of starting the long-running DingTalk Stream service:
 
 ```bash
-cd /home/yida/Project/dingtalk-bots/apps/cp_bot
-scripts/openclaw-run-cp-check.sh SP260421012 --user-id <sender_id> --user-name <sender_name>
+cd /Users/kerden/Projects/yida/dingtalk-bots
+apps/cp_bot/scripts/openclaw-run-cp-check.sh SP260421012 --user-id <sender_id> --user-name <sender_name>
 ```
 
 Omit `--user-id` or `--user-name` if the connector metadata is unavailable. Reply with the command's user-facing result only. Do not expose `.env`, AppSecret, SMB password, token, database password, or full internal logs.
@@ -83,15 +83,15 @@ Use a container when the host Python lacks dependencies:
 
 ```bash
 docker run --rm --network host -v "$PWD":/app -w /app python:3.11-slim-bookworm sh -lc \
-  "pip install -q -r requirements.txt -i https://pypi.org/simple && \
-   python -m unittest tests.test_address_book_source tests.test_usage_state -v && \
-   python -m py_compile app.py config.py handler.py address_book_source.py usage_state.py"
+  "pip install -q -r requirements.lock -i https://pypi.org/simple && \
+   python -m unittest apps.cp_bot.tests.test_address_book_source apps.cp_bot.tests.test_usage_state -v && \
+   python -m compileall -q apps/cp_bot shared"
 ```
 
 For a quick local test that needs no external dependencies:
 
 ```bash
-python3 -m unittest tests.test_usage_state -v
+python -m unittest apps.cp_bot.tests.test_usage_state -v
 ```
 
 ### Check SMB Address Book Access
@@ -100,8 +100,8 @@ Use `.env` values through `config`; do not echo secrets:
 
 ```bash
 python - <<'PY'
-import config
-from address_book_source import open_address_book_workbook
+from apps.cp_bot import config
+from apps.cp_bot.address_book_source import open_address_book_workbook
 result = open_address_book_workbook(
     path=config.ADDRESS_BOOK_XLSX_PATH,
     smb_host=config.SMB_HOST,

@@ -16,16 +16,16 @@ import dingtalk_stream
 import requests
 from dingtalk_stream import AckMessage
 
-from pdf_zip_bot import build_rules_from_workbook, format_rule_preview_markdown, workbook_uses_explicit_pages
-from pdf_zip_bot.rules import SplitRule
-from pdf_zip_bot.messages import MessageFormatError
-from Bot.runtime import (
+from apps.split_bot.pdf_zip_bot import build_rules_from_workbook, format_rule_preview_markdown, workbook_uses_explicit_pages
+from apps.split_bot.pdf_zip_bot.rules import SplitRule
+from apps.split_bot.pdf_zip_bot.messages import MessageFormatError
+from apps.split_bot.Bot.runtime import (
     MessageDeduplicator,
     collect_download_codes,
     collect_file_names_by_download_code,
     run_split_job,
 )
-from Utils.dingtalk_api import get_token, send_robot_private_file_message, send_robot_private_text_message
+from apps.split_bot.Utils.dingtalk_api import get_token, send_robot_private_file_message, send_robot_private_text_message
 
 
 @dataclass

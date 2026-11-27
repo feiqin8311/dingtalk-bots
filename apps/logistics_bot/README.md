@@ -41,11 +41,11 @@ Unified DingTalk Stream bot for Logistics department workflows.
 From monorepo root:
 
 ```bash
-python apps/logistics_bot/main.py
+python -m apps.logistics_bot.main
 ```
 
 Docker:
 
 ```bash
-docker compose up -d --build dingtalk-logistics-bot
+docker compose up -d --build dingtalk-bot
 ```

@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock, patch
 from openpyxl import Workbook
 from pypdf import PdfWriter
 
-from Bot.handler import PendingConfirmation, PendingUpload, PdfSplitBotHandler
-from Bot.runtime import MessageDeduplicator, collect_download_codes, collect_file_names_by_download_code, run_split_job
-from pdf_zip_bot import parse_rules_table
+from apps.split_bot.Bot.handler import PendingConfirmation, PendingUpload, PdfSplitBotHandler
+from apps.split_bot.Bot.runtime import MessageDeduplicator, collect_download_codes, collect_file_names_by_download_code, run_split_job
+from apps.split_bot.pdf_zip_bot import parse_rules_table
 
 
 class DownloadCodeCollectionTests(unittest.TestCase):
@@ -101,7 +101,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.Session.get',
+                'apps.split_bot.Bot.handler.requests.Session.get',
                 side_effect=[
                     self._response('source.pdf', 'application/pdf', pdf_bytes),
                     self._response(
@@ -129,7 +129,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.Session.get',
+                'apps.split_bot.Bot.handler.requests.Session.get',
                 side_effect=[self._response('source.pdf', 'application/pdf', pdf_bytes)],
             ):
                 downloaded = handler._download_message_files(['PDF-CODE'], 'message-1')
@@ -148,7 +148,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.Session.get',
+                'apps.split_bot.Bot.handler.requests.Session.get',
                 side_effect=[
                     self._response(
                         'rules.xlsx',
@@ -173,7 +173,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.Session.get',
+                'apps.split_bot.Bot.handler.requests.Session.get',
                 side_effect=[
                     self._response(
                         'attachment-1',
@@ -199,7 +199,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.Session.get',
+                'apps.split_bot.Bot.handler.requests.Session.get',
                 side_effect=[self._response('attachment-1', 'application/pdf', pdf_bytes)],
             ):
                 downloaded = handler._download_message_files(['PDF-CODE'], 'message-1', file_names)
@@ -260,9 +260,9 @@ class HandlerReplyTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(handler, '_send_text', new=AsyncMock()) as send_text, \
                 patch.object(handler, '_reply_markdown', new=AsyncMock()) as reply_markdown, \
                 patch.object(handler, '_download_message_files', return_value=attachments), \
-                patch('Bot.handler.build_rules_from_workbook', return_value=[]), \
-                patch('Bot.handler.workbook_uses_explicit_pages', return_value=False), \
-                patch('Bot.handler.format_rule_preview_markdown', return_value=preview_message), \
+                patch('apps.split_bot.Bot.handler.build_rules_from_workbook', return_value=[]), \
+                patch('apps.split_bot.Bot.handler.workbook_uses_explicit_pages', return_value=False), \
+                patch('apps.split_bot.Bot.handler.format_rule_preview_markdown', return_value=preview_message), \
                 patch.object(Path, 'read_bytes', side_effect=[b'workbook-bytes']):
                 await handler._handle_message(incoming_message, 'user-1', {'attachments': [{'downloadCode': 'PDF'}]})
 
@@ -285,9 +285,9 @@ class HandlerReplyTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(handler, '_reply_markdown', new=AsyncMock()) as reply_markdown, \
                 patch.object(handler, '_send_file', new=AsyncMock()) as send_file, \
                 patch.object(handler, '_download_message_files', return_value=attachments), \
-                patch('Bot.handler.build_rules_from_workbook', return_value=[]), \
-                patch('Bot.handler.workbook_uses_explicit_pages', return_value=True), \
-                patch('Bot.handler.run_split_job', new=AsyncMock(return_value=archive)):
+                patch('apps.split_bot.Bot.handler.build_rules_from_workbook', return_value=[]), \
+                patch('apps.split_bot.Bot.handler.workbook_uses_explicit_pages', return_value=True), \
+                patch('apps.split_bot.Bot.handler.run_split_job', new=AsyncMock(return_value=archive)):
                 await handler._handle_message(incoming_message, 'user-1', {'attachments': [{'downloadCode': 'PDF'}]})
 
             reply_markdown.assert_not_called()
@@ -318,7 +318,7 @@ class HandlerReplyTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        with patch('Bot.handler.dingtalk_stream.ChatbotMessage.from_dict', return_value=SimpleNamespace(
+        with patch('apps.split_bot.Bot.handler.dingtalk_stream.ChatbotMessage.from_dict', return_value=SimpleNamespace(
             sender_staff_id='user-1',
             message_id='message-1',
             create_at=1,
@@ -354,9 +354,9 @@ class HandlerReplyTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(handler, '_download_message_files', return_value=excel_only), \
             patch.object(handler, '_send_text', new=AsyncMock()) as send_text, \
             patch.object(handler, '_reply_markdown', new=AsyncMock()) as reply_markdown, \
-            patch('Bot.handler.build_rules_from_workbook', return_value=[]), \
-            patch('Bot.handler.workbook_uses_explicit_pages', return_value=False), \
-            patch('Bot.handler.format_rule_preview_markdown', return_value=preview_message), \
+            patch('apps.split_bot.Bot.handler.build_rules_from_workbook', return_value=[]), \
+            patch('apps.split_bot.Bot.handler.workbook_uses_explicit_pages', return_value=False), \
+            patch('apps.split_bot.Bot.handler.format_rule_preview_markdown', return_value=preview_message), \
             patch.object(Path, 'read_bytes', side_effect=[b'workbook-bytes']):
             await handler._handle_message(incoming_message, 'user-1', {'attachments': [{'downloadCode': 'XLSX'}]})
 
@@ -376,7 +376,7 @@ class HandlerReplyTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(handler, '_send_text', new=AsyncMock()) as send_text, \
             patch.object(handler, '_send_file', new=AsyncMock()) as send_file, \
-            patch('Bot.handler.run_split_job', new=AsyncMock(return_value=archive)):
+            patch('apps.split_bot.Bot.handler.run_split_job', new=AsyncMock(return_value=archive)):
             await handler._handle_message(incoming_message, 'user-1', {'text': {'content': '确认'}})
 
         send_text.assert_any_await('user-1', '已确认，开始拆分并生成 ZIP，请稍等。')

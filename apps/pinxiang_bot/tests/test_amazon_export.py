@@ -8,10 +8,8 @@ import unittest
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parents[1]
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
-from amazon_export import (  # noqa: E402
+from apps.pinxiang_bot.amazon_export import (  # noqa: E402
     create_amazon_workbook,
     _manifest_rows,
     _is_mixed_packing_row,
@@ -19,17 +17,14 @@ from amazon_export import (  # noqa: E402
     CM_TO_INCH,
     KG_TO_LB,
 )
-from packing import PackingResult, PackingRow, Template1Row, process_shipment_file  # noqa: E402
+from apps.pinxiang_bot.packing import PackingResult, PackingRow, Template1Row, process_shipment_file  # noqa: E402
 
-import pinxiang_config  # noqa: E402
+import apps.pinxiang_bot.pinxiang_config as pinxiang_config  # noqa: E402
 
 TPL = pinxiang_config.AMAZON_TEMPLATE_MPL
 TPL2 = pinxiang_config.AMAZON_TEMPLATE_MPL2
-TEST_SHIPMENT = Path("/Users/kerden/Desktop/测试数据/发货单-943520755484897280.xlsx")
-TEST_MANIFEST = Path(
-    "/Users/kerden/Desktop/测试数据/"
-    "ManifestFileUpload_Template_IncludeCasePack_IncludeExpirationDate_IncludeMLC_MPL(3).xlsx"
-)
+
+from .workbook_samples import write_shipment
 
 
 class AmazonExportTests(unittest.TestCase):
@@ -63,7 +58,6 @@ class AmazonExportTests(unittest.TestCase):
         self.assertEqual(rows[2][0].sku, "B")
         self.assertFalse(rows[2][1])
 
-    @unittest.skipUnless(TPL2.is_file(), "template missing")
     def test_write_workbook_fallback_amazon_rows(self):
         result = PackingResult(
             rows=[],
@@ -100,7 +94,6 @@ class AmazonExportTests(unittest.TestCase):
         self.assertFalse(_use_imperial("Canada"))
         self.assertFalse(_use_imperial("CA"))
 
-    @unittest.skipUnless(TPL2.is_file(), "template missing")
     def test_write_workbook_from_template1_sheet(self):
         result = PackingResult(
             country="美国",
@@ -146,7 +139,6 @@ class AmazonExportTests(unittest.TestCase):
             self.assertEqual(ws.cell(header + 2, 2).value, 15)
             self.assertIn(ws.cell(header + 2, 5).value, (None, ""))
 
-    @unittest.skipUnless(TPL2.is_file(), "template missing")
     def test_canada_keeps_metric_units(self):
         result = PackingResult(
             country="加拿大",
@@ -182,7 +174,7 @@ class AmazonExportTests(unittest.TestCase):
             self.assertEqual(ws.cell(header + 1, 10).value, 10)
 
     def test_canada_picks_mpl3_shell(self):
-        import pinxiang_config
+        import apps.pinxiang_bot.pinxiang_config as pinxiang_config
 
         us = pinxiang_config.amazon_template_mpl("美国")
         ca = pinxiang_config.amazon_template_mpl("加拿大")
@@ -221,60 +213,24 @@ class AmazonExportTests(unittest.TestCase):
             self.assertEqual(ws.cell(header + 1, 7).value, 40)
             self.assertEqual(ws.cell(header + 1, 10).value, 12)
 
-    @unittest.skipUnless(
-        TPL.is_file() and TEST_SHIPMENT.is_file() and TEST_MANIFEST.is_file(),
-        "desktop fixtures missing",
-    )
-    def test_manifest_matches_desktop_sample(self):
-        result = process_shipment_file(TEST_SHIPMENT)
+    def test_manifest_exports_full_then_partial_from_shipment(self):
+        from openpyxl import load_workbook
+
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "m.xlsx"
+            folder = Path(tmp)
+            result = process_shipment_file(write_shipment(folder / "shipment.xlsx"))
+            out = folder / "manifest.xlsx"
             create_amazon_workbook(template_source=TPL, output_path=out, result=result)
-            from openpyxl import load_workbook
-
-            got_wb = load_workbook(out, data_only=True)
-            exp_wb = load_workbook(TEST_MANIFEST, data_only=True)
-            got = got_wb["Create workflow – template"]
-            exp = exp_wb["Create workflow – template"]
-            gh = next(r for r in range(1, 15) if got.cell(r, 1).value == "Merchant SKU")
-            eh = next(r for r in range(1, 15) if exp.cell(r, 1).value == "Merchant SKU")
-
-            def rows(ws, header):
-                out_rows = []
-                r = header + 1
-                while True:
-                    sku = ws.cell(r, 1).value
-                    if sku is None or str(sku).strip() == "":
-                        break
-                    out_rows.append(
-                        (
-                            str(sku).strip(),
-                            float(ws.cell(r, 2).value or 0),
-                            ws.cell(r, 5).value,
-                            ws.cell(r, 6).value,
-                            ws.cell(r, 7).value,
-                            ws.cell(r, 8).value,
-                            ws.cell(r, 9).value,
-                            ws.cell(r, 10).value,
-                        )
-                    )
-                    r += 1
-                return out_rows
-
-            got_rows = rows(got, gh)
-            exp_rows = rows(exp, eh)
-            # 整箱段顺序与样例一致；非整箱仅校验集合（样例手工顺序与 sheet 略有不同）
-            self.assertEqual(got_rows[:21], exp_rows[:21])
-            self.assertEqual(sorted(got_rows[21:]), sorted(exp_rows[21:]))
-            # 与 template1 一一对应
-            self.assertEqual(len(got_rows), len(result.template1_rows))
-            for i, t1 in enumerate(result.template1_rows):
-                self.assertEqual(got_rows[i][0], t1.merchant_sku)
-                self.assertEqual(got_rows[i][1], float(t1.qty))
-                if t1.is_full_box:
-                    self.assertEqual(got_rows[i][2], int(t1.units_per_box or 0))
-                else:
-                    self.assertIn(got_rows[i][2], (None, ""))
+            wb = load_workbook(out, data_only=True)
+            try:
+                ws = wb["Create workflow – template"]
+                header = next(r for r in range(1, 15) if ws.cell(r, 1).value == "Merchant SKU")
+                cells = lambda row: tuple(ws.cell(row, col).value for col in (1, 2, 5, 6, 7, 8, 9, 10))
+                self.assertEqual(cells(header + 1), ("M-FULL", 40, 20, 2, 15.75, 11.81, 7.87, 22.05))
+                self.assertEqual(cells(header + 2), ("M-PART", 5, None, None, None, None, None, None))
+                self.assertIsNone(ws.cell(header + 3, 1).value)
+            finally:
+                wb.close()
 
 
 if __name__ == "__main__":

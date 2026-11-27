@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from pingyi_client import TrackEvent
+from apps.track_notify.pingyi_client import TrackEvent
 
 
 def _compact(text: str) -> str:

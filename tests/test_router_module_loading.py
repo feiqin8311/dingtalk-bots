@@ -17,14 +17,12 @@ class RouterModuleLoadingTest(unittest.TestCase):
         script = textwrap.dedent(
             """
             import inspect, json, sys
-            import os
-            root = os.getcwd()
-            sys.path.insert(0, os.path.join(root, "apps", "logistics_bot"))
-            # bad order: cp_bot already on sys.path but behind pinxiang_bot, so a
-            # "skip if present" path tweak would leave bare `handler` = pinxiang's
-            sys.path.insert(0, os.path.join(root, "apps", "cp_bot"))
-            sys.path.insert(0, os.path.join(root, "apps", "pinxiang_bot"))
-            import router
+            from types import ModuleType
+            sys.modules.update({name: ModuleType(name) for name in ("handler", "config", "settings")})
+            before = sys.path[:]
+            from apps.logistics_bot import router
+            from apps.track_notify import runner
+            assert sys.path == before
             print(json.dumps({
                 name: inspect.getfile(getattr(router, name))
                 for name in ("ShipmentQueryHandler", "PinxiangBotHandler", "PdfSplitBotHandler",

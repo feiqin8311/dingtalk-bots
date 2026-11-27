@@ -17,7 +17,7 @@ from typing import Union
 from openpyxl import load_workbook
 from openpyxl.styles import Border, Side
 
-from packing import PackingResult, PackingRow, Template1Row  # noqa: E402
+from apps.pinxiang_bot.packing import PackingResult, PackingRow, Template1Row  # noqa: E402
 
 PathLike = Union[str, Path]
 

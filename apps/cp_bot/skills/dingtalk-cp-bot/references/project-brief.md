@@ -2,7 +2,7 @@
 
 ## Repository
 
-`/home/yida/Project/dingtalk-bots/apps/cp_bot`
+`/Users/kerden/Projects/yida/dingtalk-bots/apps/cp_bot`
 
 ## Business Flow
 
@@ -99,9 +99,9 @@ Run all unit tests and compile in a dependency-complete container:
 
 ```bash
 docker run --rm --network host -v "$PWD":/app -w /app python:3.11-slim-bookworm sh -lc \
-  "pip install -q -r requirements.txt -i https://pypi.org/simple && \
-   python -m unittest tests.test_address_book_source tests.test_usage_state -v && \
-   python -m py_compile app.py config.py handler.py address_book_source.py usage_state.py"
+  "pip install -q -r requirements.lock -i https://pypi.org/simple && \
+   python -m unittest apps.cp_bot.tests.test_address_book_source apps.cp_bot.tests.test_usage_state -v && \
+   python -m compileall -q apps/cp_bot shared"
 ```
 
 Build Docker image:

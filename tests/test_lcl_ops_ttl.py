@@ -8,13 +8,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "apps") not in sys.path:
-    sys.path.insert(0, str(ROOT / "apps"))
 
 
 class LclOpsTtlTest(unittest.TestCase):
     def setUp(self) -> None:
-        from lcl_bot.state_manager import StateManager
+        from apps.lcl_bot.state_manager import StateManager
 
         self._tmp = tempfile.TemporaryDirectory()
         self.sm = StateManager(state_file_path=str(Path(self._tmp.name) / "workflow_state.json"))

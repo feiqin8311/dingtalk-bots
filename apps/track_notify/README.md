@@ -44,14 +44,14 @@
 
 ```bash
 # 仓库根目录
-python3 apps/track_notify/main.py --once --dry-run
-python3 apps/track_notify/main.py --once
+python -m apps.track_notify.main --once --dry-run
+python -m apps.track_notify.main --once
 ```
 
 平谊单号调试：
 
 ```bash
-python3 apps/track_notify/main.py FBA19JTBN929 --dry-run
+python -m apps.track_notify.main FBA19JTBN929 --dry-run
 ```
 
 ## 调度

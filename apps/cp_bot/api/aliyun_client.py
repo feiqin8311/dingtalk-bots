@@ -19,19 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-try:
-    # Reuse project env loading if available.
-    from . import config  # noqa: F401
-except Exception:
-    # Allow running as a standalone script.
-    for candidate in (Path(__file__).resolve().parent, *Path(__file__).resolve().parents):
-        if (candidate / "shared").is_dir():
-            sys.path.append(str(candidate))
-            break
-    try:
-        from core.integrations import config  # noqa: F401
-    except Exception:
-        config = None  # type: ignore
+from . import config  # Load the app environment before using OCR credentials.
 
 from alibabacloud_ocr_api20210707.client import Client as OcrClient
 from alibabacloud_ocr_api20210707 import models as ocr_models

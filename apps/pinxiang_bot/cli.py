@@ -9,10 +9,8 @@ import sys
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
-from pinxiang_config import (  # noqa: E402
+from apps.pinxiang_bot.pinxiang_config import (  # noqa: E402
     PRODUCT_INFO_PATH,
     SMB_CLIENT_NAME,
     SMB_PASSWORD,
@@ -20,8 +18,8 @@ from pinxiang_config import (  # noqa: E402
     SMB_TIMEOUT_SEC,
     SMB_USERNAME,
 )
-from packing import process_shipment_file, write_packing_workbook  # noqa: E402
-from product_info_source import load_product_specs  # noqa: E402
+from apps.pinxiang_bot.packing import process_shipment_file, write_packing_workbook  # noqa: E402
+from apps.pinxiang_bot.product_info_source import load_product_specs  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:

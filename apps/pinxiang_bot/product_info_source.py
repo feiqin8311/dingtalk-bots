@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from openpyxl import load_workbook
 
-from packing import ProductSpec
+from apps.pinxiang_bot.packing import ProductSpec
 
 
 def load_product_specs(

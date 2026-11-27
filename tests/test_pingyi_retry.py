@@ -9,14 +9,12 @@ from unittest.mock import MagicMock
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from dedup_store import TrackStateStore  # noqa: E402
-from dingtalk_table import TableRow  # noqa: E402
-from excel_export import ReportItem  # noqa: E402
-from pingyi_client import TrackEvent, TrackShipment  # noqa: E402
-from runner import _drop_transient_issues, _retry_pingyi_query_errors  # noqa: E402
+from apps.track_notify.dedup_store import TrackStateStore  # noqa: E402
+from apps.track_notify.dingtalk_table import TableRow  # noqa: E402
+from apps.track_notify.excel_export import ReportItem  # noqa: E402
+from apps.track_notify.pingyi_client import TrackEvent, TrackShipment  # noqa: E402
+from apps.track_notify.runner import _drop_transient_issues, _retry_pingyi_query_errors  # noqa: E402
 
 
 def _row(*, fba: str) -> TableRow:

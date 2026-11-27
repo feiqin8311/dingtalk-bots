@@ -8,10 +8,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from pingyi_client import PingyiClient, TrackEvent  # noqa: E402
+from apps.track_notify.pingyi_client import PingyiClient, TrackEvent  # noqa: E402
 
 
 SAMPLE_TRACK = {
@@ -68,7 +66,7 @@ class PingyiClientTests(unittest.TestCase):
         def fake_urlopen(req, timeout=0):
             return FakeResponse(SAMPLE_TRACK)
 
-        with patch("pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
             shipment = client.get_track("FBA19JTBN929")
 
         assert shipment is not None
@@ -89,7 +87,7 @@ class PingyiClientTests(unittest.TestCase):
                 {"success": 0, "cnmessage": "跟踪号码不存在", "data": None}
             )
 
-        with patch("pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
             self.assertIsNone(client.get_track("NOPE"))
 
     def test_event_dedup_key(self):
@@ -113,8 +111,8 @@ class PingyiClientTests(unittest.TestCase):
                 raise TimeoutError("timed out")
             return FakeResponse(SAMPLE_TRACK)
 
-        with patch("pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
-            with patch("pingyi_client.time.sleep", return_value=None):
+        with patch("apps.track_notify.pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("apps.track_notify.pingyi_client.time.sleep", return_value=None):
                 shipment = client.get_track("FBA19JTBN929")
         self.assertIsNotNone(shipment)
         self.assertEqual(calls["n"], 3)
@@ -125,8 +123,8 @@ class PingyiClientTests(unittest.TestCase):
         def fake_urlopen(req, timeout=0):
             raise TimeoutError("timed out")
 
-        with patch("pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
-            with patch("pingyi_client.time.sleep", return_value=None):
+        with patch("apps.track_notify.pingyi_client.urllib.request.urlopen", side_effect=fake_urlopen):
+            with patch("apps.track_notify.pingyi_client.time.sleep", return_value=None):
                 with self.assertRaises(TimeoutError):
                     client.get_track("FBA19JTBN929")
 

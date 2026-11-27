@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 
-import config as project_config
+import apps.cp_bot.config as project_config
 
 DINGTALK_APP_KEY = project_config.DINGTALK_APP_KEY
 DINGTALK_APP_SECRET = project_config.DINGTALK_APP_SECRET

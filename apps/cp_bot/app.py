@@ -19,14 +19,12 @@ def _find_repo_root(start: Path) -> Path:
 
 
 ROOT_DIR = _find_repo_root(Path(__file__).resolve().parent)
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 import dingtalk_stream
 
-import config
+import apps.cp_bot.config as config
 from shared.logging import setup_logger
-from handler import ShipmentQueryHandler, _DEFAULT_NOTIFIER
+from apps.cp_bot.handler import ShipmentQueryHandler, _DEFAULT_NOTIFIER
 
 
 def define_options():
