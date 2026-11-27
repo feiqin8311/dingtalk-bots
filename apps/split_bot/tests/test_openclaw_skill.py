@@ -1,28 +1,13 @@
 import importlib.util
-import os
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
 from pypdf import PdfReader, PdfWriter
 
 SKILL_DIR = Path('skills/pdf-zip-splitter')
 SCRIPT_PATH = SKILL_DIR / 'scripts' / 'pdf_split_zip.py'
-
-
-def _python_with_yaml() -> str:
-    for candidate in [sys.executable, '/usr/bin/python3', 'python3', 'python']:
-        result = subprocess.run(
-            [candidate, '-c', 'import yaml'],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            return candidate
-    return sys.executable
 
 
 class OpenClawSkillTests(unittest.TestCase):
@@ -54,21 +39,19 @@ class OpenClawSkillTests(unittest.TestCase):
             self.assertEqual(len(list(output_dir.rglob('*.pdf'))), 2)
 
     def test_skill_validates(self):
-        validate_script = Path(os.environ.get('CODEX_HOME', Path.home() / '.codex')) / 'skills/.system/skill-creator/scripts/quick_validate.py'
-        if not validate_script.exists():
-            validate_script = Path('/home/yida/.codex/skills/.system/skill-creator/scripts/quick_validate.py')
-        result = subprocess.run(
-            [
-                _python_with_yaml(),
-                str(validate_script),
-                str(SKILL_DIR),
-            ],
-            cwd='.',
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        lines = (SKILL_DIR / 'SKILL.md').read_text(encoding='utf-8').splitlines()
+        self.assertEqual(lines[0], '---')
+        end = lines.index('---', 1)
+        frontmatter = yaml.safe_load('\n'.join(lines[1:end]))
+        self.assertIsInstance(frontmatter, dict)
+        self.assertLessEqual(set(frontmatter), {'name', 'description', 'license', 'allowed-tools', 'metadata'})
+        self.assertEqual(frontmatter['name'], SKILL_DIR.name)
+        description = frontmatter['description']
+        self.assertIsInstance(description, str)
+        self.assertTrue(description.strip())
+        self.assertLessEqual(len(description), 1024)
+        self.assertNotRegex(description, r'^\s*\[TODO:|[<>]')
+        self.assertTrue(any(line.strip() for line in lines[end + 1:]))
 
     def _make_pdf(self, path: Path, pages: int) -> None:
         writer = PdfWriter()

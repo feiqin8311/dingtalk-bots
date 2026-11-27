@@ -5,6 +5,7 @@ Author: KePengxiang (Adapted for DingTalk Bot)
 Comment: 美国拼箱处理 - Excel处理逻辑模块
 """
 
+import logging
 import pandas as pd
 import warnings
 import os
@@ -16,6 +17,8 @@ from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 from openpyxl.cell.cell import MergedCell
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 # 卖家后台装箱表：中文 STA / 英文 STA（Locale=en_US）
 AMAZON_PACKAGING_SHEETS = ("包装箱包装信息", "Box packing information")
@@ -214,23 +217,23 @@ class PackingBoxProcessor:
             updated_invoice_df: 更新后的发货单（被使用的不拼箱SKU已移除）
         """
         if not groups_list:
-            print("❌ 没有分组，无法调整")
+            logger.error("❌ 没有分组，无法调整")
             return groups_list, invoice_df
         
         last_group_name, last_group_skus, last_group_weight = groups_list[-1]
         
         # 检查是否需要合并
         if self.min_weight_limit <= last_group_weight <= self.max_weight_limit:
-            print("✅ 尾组重量已在范围内（10000-18000g），无需合并")
+            logger.info("✅ 尾组重量已在范围内（10000-18000g），无需合并")
             return groups_list, invoice_df
         
-        print(f"🔄 尾组重量 {last_group_weight:.0f}g 不在范围内（10000-18000g），尝试与不拼箱SKU合并...")
+        logger.info(f"🔄 尾组重量 {last_group_weight:.0f}g 不在范围内（10000-18000g），尝试与不拼箱SKU合并...")
         
         # 收集不拼箱SKU，计算每个SKU的总重量
         non_packing_df = invoice_df[invoice_df["是否拼箱"] == "不拼箱"].copy()
         
         if non_packing_df.empty:
-            print("⚠️ 没有不拼箱SKU可用于合并，保持原状")
+            logger.warning("⚠️ 没有不拼箱SKU可用于合并，保持原状")
             return groups_list, invoice_df
         
         # 计算每个不拼箱SKU的总重量（整体）
@@ -266,16 +269,16 @@ class PackingBoxProcessor:
                 merged_skus.append(sku_data)
                 used_sku_names.append(row["SKU"])
                 
-                print(f"   ✅ 合并 SKU {row['SKU']}（{row['箱数']}箱，{sku_total_weight:.0f}g），累计重量: {merged_weight:.0f}g")
+                logger.info(f"   ✅ 合并 SKU {row['SKU']}（{row['箱数']}箱，{sku_total_weight:.0f}g），累计重量: {merged_weight:.0f}g")
                 
                 # 检查是否已达标
                 if merged_weight >= self.min_weight_limit:
-                    print(f"✅ 尾组合并成功，最终重量: {merged_weight:.0f}g")
+                    logger.info(f"✅ 尾组合并成功，最终重量: {merged_weight:.0f}g")
                     break
         
         # 检查最终是否达标
         if merged_weight < self.min_weight_limit:
-            print(f"⚠️ 合并后重量 {merged_weight:.0f}g 仍不达标，保持原状")
+            logger.warning(f"⚠️ 合并后重量 {merged_weight:.0f}g 仍不达标，保持原状")
             return groups_list, invoice_df
         
         # 更新分组
@@ -285,7 +288,7 @@ class PackingBoxProcessor:
         # 从发货单中移除已被使用的不拼箱SKU
         updated_invoice_df = invoice_df[~invoice_df["SKU"].isin(used_sku_names)].copy()
         
-        print(f"   已将 {len(used_sku_names)} 个不拼箱SKU移出单独装箱: {', '.join(str(s) for s in used_sku_names)}")
+        logger.info(f"   已将 {len(used_sku_names)} 个不拼箱SKU移出单独装箱: {', '.join(str(s) for s in used_sku_names)}")
         
         return groups_list, updated_invoice_df
 
@@ -399,7 +402,7 @@ class PackingBoxProcessor:
         
         while min_weight >= self.min_weight_limit and max_weight <= self.max_weight_limit:
             groups_list = self.group_skus_by_weight(df, min_weight, max_weight)
-            print(groups_list)
+            logger.info(groups_list)
             
             out_of_range_count = sum(1 for _, _, w in groups_list if w < min_weight or w > max_weight)
             if out_of_range_count == 0:
@@ -421,7 +424,7 @@ class PackingBoxProcessor:
     def calculate_volumes(self, merge_summary):
         """计算单品体积、单份体积和单箱体积"""
         if missing_columns := [col for col in self.REQUIRED_COLUMNS if col not in merge_summary.columns]:
-            print(f"❌ 缺少必要列，无法计算体积: {missing_columns}")
+            logger.error(f"❌ 缺少必要列，无法计算体积: {missing_columns}")
             return merge_summary
         
         if '总体积（m³）-箱子' in merge_summary.columns and '单箱数量' in merge_summary.columns:
@@ -436,16 +439,16 @@ class PackingBoxProcessor:
             on='小组名称', how='left'
         )
         
-        print("✅ 体积计算完成：\n   - 单品体积：单品长×宽×高\n   - 单份体积：单品体积×单份数量\n   - 单箱体积：小组内所有单份体积合计")
+        logger.info("✅ 体积计算完成：\n   - 单品体积：单品长×宽×高\n   - 单份体积：单品体积×单份数量\n   - 单箱体积：小组内所有单份体积合计")
         return merge_summary
 
     def calculate_box_dimensions(self, merge_summary):
         """计算单箱理论尺寸"""
         if '单箱体积' not in merge_summary.columns:
-            print("❌ 缺少必要列：'单箱体积'，无法计算单箱理论尺寸")
+            logger.error("❌ 缺少必要列：'单箱体积'，无法计算单箱理论尺寸")
             return merge_summary
         
-        print("📐 正在计算单箱理论尺寸...")
+        logger.info("📐 正在计算单箱理论尺寸...")
         dimension_data = []
         
         for group_name in merge_summary['小组名称'].unique():
@@ -468,10 +471,10 @@ class PackingBoxProcessor:
                 box_height = box_volume / (box_length * box_width)
             
             dimension_data.append({'小组名称': group_name, '单箱理论长': box_length, '单箱理论宽': box_width, '单箱理论高': box_height})
-            print(f"   - {group_name}: 长={box_length:.1f}cm, 宽={box_width:.1f}cm, 高={box_height:.1f}cm")
+            logger.info(f"   - {group_name}: 长={box_length:.1f}cm, 宽={box_width:.1f}cm, 高={box_height:.1f}cm")
         
         merge_summary = merge_summary.merge(pd.DataFrame(dimension_data), on='小组名称', how='left')
-        print("✅ 单箱理论尺寸计算完成")
+        logger.info("✅ 单箱理论尺寸计算完成")
         return merge_summary
 
     def _align_and_merge(self, data, merge_summary):
@@ -503,7 +506,7 @@ class PackingBoxProcessor:
                 if original_box_count > 0:
                     new_quantity = row['发货数量'] - row['发货数量'] / original_box_count
                     special_data.at[index, '发货数量'] = new_quantity
-                    print(f"   - SKU {row['SKU']}: 箱数 {original_box_count} → {original_box_count - 1}, 发货数量 {row['发货数量']} → {new_quantity}")
+                    logger.info(f"   - SKU {row['SKU']}: 箱数 {original_box_count} → {original_box_count - 1}, 发货数量 {row['发货数量']} → {new_quantity}")
         
         special_data['小组名称'] = group_name
         special_data['单箱重量'] = special_data['箱子毛重（kg）'] * UnitConverter.KG_TO_G
@@ -516,7 +519,7 @@ class PackingBoxProcessor:
         special_data['单品体积'] = special_data['单品长（cm）'] * special_data['单品宽（cm）'] * special_data['单品高（cm）']
         special_data['单份体积'] = special_data['单品体积'] * special_data['单份数量']
         
-        print(f"✅ 已添加 {len(special_data)} 个{group_name}的SKU（使用原数据尺寸和重量）")
+        logger.info(f"✅ 已添加 {len(special_data)} 个{group_name}的SKU（使用原数据尺寸和重量）")
         return self._align_and_merge(special_data, merge_summary)
 
     def add_no_remark_data_to_summary(self, df, merge_summary):
@@ -531,7 +534,7 @@ class PackingBoxProcessor:
     def validate_data_consistency(self, original_df, result_df):
         """校验原始数据和拼箱计算结果的发货数量和箱数是否一致"""
         if result_df.empty:
-            print("ℹ️  拼箱计算结果为空，跳过数据一致性校验")
+            logger.info("ℹ️  拼箱计算结果为空，跳过数据一致性校验")
             return True
         
         original_total_quantity = original_df['发货数量'].sum()
@@ -787,7 +790,7 @@ class PackingBoxProcessor:
 
     def insert_data_to_amazon_packaging(self, amazon_packaging_file_path, merge_summary):
         """将拼箱数据插入到Amazon包装信息文件中"""
-        print(f"\n📦 开始处理Amazon包装信息...")
+        logger.info(f"\n📦 开始处理Amazon包装信息...")
         
         xl = pd.ExcelFile(amazon_packaging_file_path)
         try:
@@ -850,17 +853,17 @@ class PackingBoxProcessor:
         for row_idx, (_, row_data) in enumerate(result_df_expanded.iterrows()):
             for col_idx, col_name in enumerate(columns_to_insert):
                 self._write_cell_value(ws, 6 + row_idx, start_col + col_idx, row_data[col_name])
-        print(f"✅ 已插入 {len(result_df_expanded)} 行数据到M6")
+        logger.info(f"✅ 已插入 {len(result_df_expanded)} 行数据到M6")
         
         spec_rows = self._amazon_spec_rows(ws)
         self._clear_amazon_spec_area(ws, start_col, spec_rows[0], len(specification_transposed))
         for row_idx, (_, row_data) in enumerate(specification_transposed.iterrows()):
             for col_idx, value in enumerate(row_data):
                 self._write_cell_value(ws, spec_rows[row_idx], start_col + col_idx, value)
-        print(f"✅ 已插入 {len(specification_transposed)} 行specification数据到M{spec_rows[0]}")
+        logger.info(f"✅ 已插入 {len(specification_transposed)} 行specification数据到M{spec_rows[0]}")
         
         wb.save(amazon_packaging_file_path)
-        print(f"✅ 数据已成功插入并保存到：{amazon_packaging_file_path}")
+        logger.info(f"✅ 数据已成功插入并保存到：{amazon_packaging_file_path}")
 
     def _get_total_box_count(self, merge_summary):
         """计算最终Amazon文件需要展示的总箱数。"""
@@ -963,7 +966,7 @@ class PackingBoxProcessor:
                 )
         
         total_columns = len([col for col in result_df.columns if col not in ['SKU', '小组名称']])
-        print(f"✅ 列展开完成，{len(unique_groups)}个小组 × {total_columns}列")
+        logger.info(f"✅ 列展开完成，{len(unique_groups)}个小组 × {total_columns}列")
         return result_df
 
     @staticmethod
@@ -1006,7 +1009,7 @@ class PackingBoxProcessor:
 
     def create_amazon_template(self, template_file_path, merge_summary, template_source=None):
         """基于模板文件创建Amazon发货模板Excel文件并填入数据"""
-        print("📝 正在基于模板创建Amazon发货文件...")
+        logger.info("📝 正在基于模板创建Amazon发货文件...")
         
         template_source = template_source or config.AMAZON_TEMPLATE_SOURCE_FILE
         if not os.path.exists(template_source):
@@ -1016,7 +1019,7 @@ class PackingBoxProcessor:
 
         os.makedirs(os.path.dirname(template_file_path), exist_ok=True)
         shutil.copy2(template_source, template_file_path)
-        print(f"✅ 已复制模板文件: {template_source}")
+        logger.info(f"✅ 已复制模板文件: {template_source}")
         
         # 加载复制的文件并填写数据
         wb = load_workbook(template_file_path)
@@ -1025,10 +1028,10 @@ class PackingBoxProcessor:
         ws = wb["Create workflow – template"]
         if not merge_summary.empty:
             self._fill_example_data(ws, merge_summary)
-            print(f"✅ 已在模板中填入数据")
+            logger.info(f"✅ 已在模板中填入数据")
         
         wb.save(template_file_path)
-        print(f"✅ Amazon发货文件已保存：{template_file_path}")
+        logger.info(f"✅ Amazon发货文件已保存：{template_file_path}")
 
     def _find_amazon_workflow_header_row(self, ws):
         """定位Amazon模板表头行，兼容含默认owner行的新模板。"""
@@ -1078,13 +1081,13 @@ class PackingBoxProcessor:
             
             data_row += 1
         
-        print(f"✅ 已填入 {len(merge_summary)} 条数据")
+        logger.info(f"✅ 已填入 {len(merge_summary)} 条数据")
 
     def process(self):
         """主处理函数 - 执行完整的拼箱处理流程"""
-        print("=" * 50)
-        print("开始处理拼箱数据...")
-        print("=" * 50)
+        logger.info("=" * 50)
+        logger.info("开始处理拼箱数据...")
+        logger.info("=" * 50)
         
         # 读取并预处理数据
         invoice_df = self._load_and_preprocess_data()
@@ -1127,9 +1130,9 @@ class PackingBoxProcessor:
         
         self.safe_save_data(merge_summary)
         
-        print("=" * 50)
-        print(f"✅ 拼箱处理完成！结果已保存至: {self.output_file_path}")
-        print("=" * 50)
+        logger.info("=" * 50)
+        logger.info(f"✅ 拼箱处理完成！结果已保存至: {self.output_file_path}")
+        logger.info("=" * 50)
         
         return merge_summary
 
@@ -1247,7 +1250,7 @@ class PackingBoxProcessor:
         # 计算单份总重量
         lcl_df["单份总重量"] = lcl_df["单份数量"] * lcl_df["单品毛重（g）"]
 
-        print(lcl_df)
+        logger.info(lcl_df)
         used_groups = self._group_skus_by_compatible_box_count(lcl_df)
     
         # 使用新的尾组合并逻辑：将尾组与不拼箱SKU整体合并
@@ -1266,10 +1269,10 @@ class PackingBoxProcessor:
         # 打印分组信息
         for group_name, skus, group_weight in groups:
             in_range = "✅" if self.min_weight <= group_weight <= self.max_weight else "⚠️"
-            print(f"   - {group_name}: {len(skus)} 个SKU, 总重量 {group_weight:.2f} g {in_range}")
+            logger.info(f"   - {group_name}: {len(skus)} 个SKU, 总重量 {group_weight:.2f} g {in_range}")
         
         if (out_of_range_count := sum(1 for _, _, w in groups if not (self.min_weight <= w <= self.max_weight))) > 0:
-            print(f"⚠️  注意：有 {out_of_range_count} 个小组的重量不在{self.min_weight}-{self.max_weight}g的理想范围内")
+            logger.warning(f"⚠️  注意：有 {out_of_range_count} 个小组的重量不在{self.min_weight}-{self.max_weight}g的理想范围内")
         
         self.validate_data_consistency(invoice_df, merge_summary)
         

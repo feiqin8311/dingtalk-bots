@@ -622,6 +622,7 @@ class ShipmentQueryHandler(dingtalk_stream.ChatbotHandler):
         )
         self._ocr_client: Optional[AliyunOCRClient] = None
         self._ocr_client_lock = threading.Lock()
+        self._bg_log_futures: set = set()
 
         self._max_concurrent_requests = max(1, int(config.MAX_CONCURRENT_REQUESTS))
         self._message_dedup_ttl_sec = max(60, int(config.MESSAGE_DEDUP_TTL_SEC))
@@ -934,6 +935,38 @@ class ShipmentQueryHandler(dingtalk_stream.ChatbotHandler):
     ) -> None:
         if str(event_type).strip().upper() != "RECEIVED":
             return
+        kwargs = dict(
+            request_id=request_id,
+            message_id=message_id,
+            user_id=user_id,
+            user_name=user_name,
+            event_type=event_type,
+            ack_status=ack_status,
+            shipment_sns=shipment_sns,
+            detail=detail,
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._write_request_event(**kwargs)
+            return
+        # sync pymysql (30s read/write timeouts) must not stall the shared event loop
+        future = loop.run_in_executor(None, lambda: self._write_request_event(**kwargs))
+        self._bg_log_futures.add(future)
+        future.add_done_callback(self._bg_log_futures.discard)
+
+    def _write_request_event(
+        self,
+        *,
+        request_id: str,
+        message_id: Optional[str],
+        user_id: Optional[str],
+        user_name: Optional[str],
+        event_type: str,
+        ack_status: Optional[str],
+        shipment_sns: Optional[List[str]],
+        detail: Optional[str],
+    ) -> None:
         try:
             self._state_store.log_request_event(
                 request_id=request_id,

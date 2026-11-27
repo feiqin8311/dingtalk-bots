@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import logging
 import re
 import sys
@@ -20,36 +22,38 @@ _BRANCH_STATE_PATH = ROOT_DIR / "apps" / "logistics_bot" / ".state" / "selected_
 _VALID_BRANCHES = frozenset({"cp", "split", "pinxiang", "lcl", "fba"})
 
 
-CP_APP_DIR = ROOT_DIR / "apps" / "cp_bot"
-SPLIT_APP_DIR = ROOT_DIR / "apps" / "split_bot"
-PINXIANG_APP_DIR = ROOT_DIR / "apps" / "pinxiang_bot"
-LCL_APP_DIR = ROOT_DIR / "apps" / "lcl_bot"
-# insert order: last wins for top-level `handler` → cp_bot must be last
-for path in (str(SPLIT_APP_DIR), str(CP_APP_DIR)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+APPS_DIR = ROOT_DIR / "apps"
+CP_APP_DIR = APPS_DIR / "cp_bot"
+SPLIT_APP_DIR = APPS_DIR / "split_bot"
+PINXIANG_APP_DIR = APPS_DIR / "pinxiang_bot"
 
-from handler import ShipmentQueryHandler  # type: ignore  # noqa: E402
+# cp_bot / split_bot / pinxiang_bot use flat sibling imports (`import config`,
+# `from Bot.handler ...`), so their dirs must be on sys.path. Order no longer
+# matters: the two clashing top-level `handler.py` files (cp, pinxiang) are
+# loaded by file path under unique names below, never as bare `handler`.
+# apps/ itself is for the real packages (lcl_bot, fba_label_bot).
+for _path in (str(APPS_DIR), str(SPLIT_APP_DIR), str(CP_APP_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+
+def _load_app_module(alias: str, file_path: Path):
+    spec = importlib.util.spec_from_file_location(alias, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {file_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+ShipmentQueryHandler = _load_app_module("cp_bot_handler", CP_APP_DIR / "handler.py").ShipmentQueryHandler
+PinxiangBotHandler = _load_app_module("pinxiang_bot_handler", PINXIANG_APP_DIR / "handler.py").PinxiangBotHandler
+
 from Bot.handler import PdfSplitBotHandler  # type: ignore  # noqa: E402
 from Bot.runtime import collect_download_codes  # type: ignore  # noqa: E402
 from Utils.dingtalk_api import get_token, send_robot_private_text_message  # type: ignore  # noqa: E402
 from shared.call_log import ProjectCallLogStore  # noqa: E402
-
-# pinxiang / lcl isolated: absolute path load so they never shadow cp_bot.handler
-import importlib.util
-
-_pinxiang_spec = importlib.util.spec_from_file_location(
-    "pinxiang_bot_handler",
-    PINXIANG_APP_DIR / "handler.py",
-)
-assert _pinxiang_spec and _pinxiang_spec.loader
-_pinxiang_module = importlib.util.module_from_spec(_pinxiang_spec)
-sys.modules["pinxiang_bot_handler"] = _pinxiang_module
-_pinxiang_spec.loader.exec_module(_pinxiang_module)
-PinxiangBotHandler = _pinxiang_module.PinxiangBotHandler
-
-if str(LCL_APP_DIR) not in sys.path:
-    sys.path.insert(0, str(LCL_APP_DIR.parent))  # apps/ so `import lcl_bot` works
 from lcl_bot.handlers import WorkflowBotHandler as LclBotHandler  # type: ignore  # noqa: E402
 from fba_label_bot.handler import FbaLabelBotHandler  # type: ignore  # noqa: E402
 
@@ -158,6 +162,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         self._branch_lock = threading.Lock()
         self._selected_branch_by_user: dict[str, RouteName] = self._load_branch_state()
         self._call_log = self._build_call_log_store()
+        # fire-and-forget call-log writes; held here so they are not GC'd mid-run
+        self._bg_tasks: set[asyncio.Task] = set()
 
     async def process(self, callback: dingtalk_stream.CallbackMessage) -> Tuple[str, str]:
         if getattr(self.split_handler, "dingtalk_client", None) is None:
@@ -173,9 +179,15 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         user_id = self._extract_user_id(callback.data)
         route = self._route(callback.data, user_id=user_id)
         self.logger.info("logistics router selected route=%s", route)
-        self._log_route_event(callback.data, route=route, user_id=user_id)
+        if self._call_log is not None:
+            # sync pymysql (up to 30s timeouts): keep it off the shared event loop and off the reply path
+            task = asyncio.create_task(
+                asyncio.to_thread(self._log_route_event, callback.data, route=route, user_id=user_id)
+            )
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
         if route == "reset":
-            self._reset_user(user_id)
+            await self._reset_user(user_id)
             still_packing = self._handler_has_work(self.pinxiang_handler, user_id) or self._handler_has_work(
                 self.lcl_handler, user_id
             )
@@ -409,7 +421,7 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         return "\n".join(item for item in candidates if item).strip()
 
     async def _send_text(self, payload: dict, message: str) -> None:
-        if self._send_session_text(payload, message):
+        if await asyncio.to_thread(self._send_session_text, payload, message):
             return
         user_id = self._extract_user_id(payload)
         if not user_id:
@@ -422,7 +434,7 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         if not token:
             self.logger.warning("cannot send text: missing DingTalk access token")
             return
-        send_robot_private_text_message(token, self.config, [user_id], message)
+        await asyncio.to_thread(send_robot_private_text_message, token, self.config, [user_id], message)
 
     def _send_session_text(self, payload: dict, message: str) -> bool:
         webhook = self._extract_session_webhook(payload)
@@ -438,12 +450,11 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             self.logger.warning("session webhook send failed: %s", exc)
             return False
 
-    def _reset_user(self, user_id: str) -> None:
+    async def _reset_user(self, user_id: str) -> None:
         if not user_id:
             return
-        prev = self._selected_branch_by_user.get(user_id)
         with self._branch_lock:
-            self._selected_branch_by_user.pop(user_id, None)
+            prev = self._selected_branch_by_user.pop(user_id, None)
             self._save_branch_state_unlocked()
         self.split_handler._pending_uploads.pop(user_id, None)
         self.split_handler._pending_confirmations.pop(user_id, None)
@@ -451,17 +462,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         clear = getattr(self.pinxiang_handler, "clear_user", None)
         if callable(clear):
             clear(user_id)
-        # lcl：物流重置只清物流会话，保留运营进行中的单与队列
-        if prev == "lcl":
-            try:
-                sm = getattr(self.lcl_handler, "state_manager", None)
-                if sm is not None:
-                    if hasattr(sm, "reset_logistics_only"):
-                        sm.reset_logistics_only()
-                    elif hasattr(sm, "release_logistics_session"):
-                        sm.release_logistics_session()
-            except Exception as exc:
-                self.logger.warning("lcl logistics-only reset failed: %s", exc)
+        if prev == "lcl" or self.lcl_handler.has_logistics_session(user_id):
+            await self.lcl_handler.reset_logistics_for_user(user_id)
 
     @staticmethod
     def _extract_user_id(payload: dict) -> str:

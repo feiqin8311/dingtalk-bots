@@ -4,6 +4,7 @@
 状态管理器 - 管理钉钉机器人工作流状态
 """
 
+import logging
 from datetime import datetime
 import json
 import os
@@ -11,6 +12,8 @@ import re
 from typing import Any, Dict, Optional
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowState:
@@ -42,7 +45,7 @@ class StateManager:
                         loaded_state.setdefault(key, value)
                     return loaded_state
             except Exception as e:
-                print(f"⚠️  加载状态文件失败: {e}，使用默认状态")
+                logger.warning(f"⚠️  加载状态文件失败: {e}，使用默认状态")
         
         return default_state
     
@@ -74,7 +77,7 @@ class StateManager:
             with open(self.state_file_path, 'w', encoding='utf-8') as f:
                 json.dump(self.state, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"❌ 保存状态文件失败: {e}")
+            logger.error(f"❌ 保存状态文件失败: {e}")
     
     def get_status(self) -> str:
         """获取当前状态"""
@@ -135,7 +138,7 @@ class StateManager:
         self.state["status"] = WorkflowState.WAIT_OPS_SELECT
         self.state["logistics_phase"] = "WAIT_OPS_SELECT"
         self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.WAIT_OPS_SELECT}")
+        logger.info(f"✅ 状态已更新: {WorkflowState.WAIT_OPS_SELECT}")
 
     def is_waiting_for_delete_confirmation(self, ops_user_id: Optional[str] = None) -> bool:
         """检查是否等待运营确认删除发货单"""
@@ -193,7 +196,7 @@ class StateManager:
             'created_at': datetime.now().isoformat()
         })
         self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.LOGISTICS_UPLOADED}")
+        logger.info(f"✅ 状态已更新: {WorkflowState.LOGISTICS_UPLOADED}")
     
     def set_logistics_confirmed(self, operation_user_ids: list):
         """设置已转发运营（从选运营或旧确认路径进入）"""
@@ -205,7 +208,7 @@ class StateManager:
         if operation_user_ids:
             self.state["operation_user_id"] = operation_user_ids[0]
         self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.LOGISTICS_CONFIRMED}")
+        logger.info(f"✅ 状态已更新: {WorkflowState.LOGISTICS_CONFIRMED}")
 
     def snapshot_current_job(self) -> Dict[str, Any]:
         """从当前物流会话快照一单，供运营 active/queue 使用。"""
@@ -485,7 +488,7 @@ class StateManager:
         self.state["ops_active"] = ops_active
         self.state["ops_queue"] = ops_queue
         self._save_state()
-        print("✅ 物流会话已释放，运营队列保留")
+        logger.info("✅ 物流会话已释放，运营队列保留")
 
     def finish_ops_job_and_promote(self, ops_id: str) -> Optional[Dict[str, Any]]:
         """结束运营当前单；若有排队则激活下一单并返回 job，否则 None。"""
@@ -543,7 +546,7 @@ class StateManager:
             active[str(operation_user_id)] = job
             self.state["ops_active"] = active
         self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.OPERATION_UPLOADED}")
+        logger.info(f"✅ 状态已更新: {WorkflowState.OPERATION_UPLOADED}")
 
     def set_waiting_for_delete_confirmation(self, operation_user_id: Optional[str] = None):
         """设置等待删除确认状态"""
@@ -558,7 +561,7 @@ class StateManager:
                 active[op_id] = job
                 self.state["ops_active"] = active
         self._save_state()
-        print(f"✅ 状态已更新: {WorkflowState.WAIT_DELETE_CONFIRMATION}")
+        logger.info(f"✅ 状态已更新: {WorkflowState.WAIT_DELETE_CONFIRMATION}")
 
     def reset_logistics_only(self) -> None:
         """物流【重置】专用：只清物流会话，完整保留所有运营 active/queue。"""
@@ -574,7 +577,7 @@ class StateManager:
             self.activate_ops_job(pick_id, ops_active[pick_id])
         else:
             self._save_state()
-        print(f"✅ 物流会话已重置(运营流程不受影响) active={len(ops_active)} queue={len(ops_queue)}")
+        logger.info(f"✅ 物流会话已重置(运营流程不受影响) active={len(ops_active)} queue={len(ops_queue)}")
 
     def reset(self):
         """结束当前运营单并重置；保留其他运营的 active/queue，物流可接单。"""
@@ -605,14 +608,14 @@ class StateManager:
             next_job = dict(next_job)
             next_job["needs_push"] = True
             self.activate_ops_job(str(finishing), next_job)
-            print(f"✅ 状态重置并提升队列: ops={finishing}")
+            logger.info(f"✅ 状态重置并提升队列: ops={finishing}")
         elif ops_active:
             pick_id = next(iter(ops_active.keys()))
             self.activate_ops_job(pick_id, ops_active[pick_id])
-            print(f"✅ 状态已重置(保留其他ops): active={len(ops_active)}")
+            logger.info(f"✅ 状态已重置(保留其他ops): active={len(ops_active)}")
         else:
             self._save_state()
-            print("✅ 状态已重置: IDLE")
+            logger.info("✅ 状态已重置: IDLE")
     
     def get_logistics_user_id(self) -> Optional[str]:
         """获取物流人员ID"""
@@ -707,7 +710,7 @@ class StateManager:
         
         self.state['status'] = previous_status
         self._save_state()
-        print(f"✅ 状态已回滚: {previous_status}")
+        logger.info(f"✅ 状态已回滚: {previous_status}")
 
 
 # 单例模式：全局状态管理器实例

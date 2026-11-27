@@ -101,7 +101,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.get',
+                'Bot.handler.requests.Session.get',
                 side_effect=[
                     self._response('source.pdf', 'application/pdf', pdf_bytes),
                     self._response(
@@ -129,7 +129,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.get',
+                'Bot.handler.requests.Session.get',
                 side_effect=[self._response('source.pdf', 'application/pdf', pdf_bytes)],
             ):
                 downloaded = handler._download_message_files(['PDF-CODE'], 'message-1')
@@ -148,7 +148,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.get',
+                'Bot.handler.requests.Session.get',
                 side_effect=[
                     self._response(
                         'rules.xlsx',
@@ -173,7 +173,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.get',
+                'Bot.handler.requests.Session.get',
                 side_effect=[
                     self._response(
                         'attachment-1',
@@ -199,7 +199,7 @@ class AttachmentDownloadTests(unittest.TestCase):
                 'get_image_download_url',
                 side_effect=lambda code: f'https://example.test/{code}',
             ), patch(
-                'Bot.handler.requests.get',
+                'Bot.handler.requests.Session.get',
                 side_effect=[self._response('attachment-1', 'application/pdf', pdf_bytes)],
             ):
                 downloaded = handler._download_message_files(['PDF-CODE'], 'message-1', file_names)

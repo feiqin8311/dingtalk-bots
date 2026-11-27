@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import logging
 import shutil
@@ -9,7 +10,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,8 +40,12 @@ def _load_router_module():
     lcl_pkg = types.ModuleType("lcl_bot")
     lcl_pkg.handlers = lcl_handlers_mod
 
+    cp_handler_cls = MagicMock()
+
     class _Loader:
+        # router loads both cp_bot and pinxiang_bot handler.py by file path through this hook
         def exec_module(self, mod):
+            mod.ShipmentQueryHandler = cp_handler_cls
             mod.PinxiangBotHandler = pinxiang_mod.PinxiangBotHandler
 
     class _Spec:
@@ -58,7 +63,6 @@ def _load_router_module():
             "settings": settings_mod,
             "dingtalk_stream": MagicMock(),
             "dingtalk_stream.chatbot": MagicMock(),
-            "handler": MagicMock(ShipmentQueryHandler=MagicMock()),
             "Bot.handler": MagicMock(PdfSplitBotHandler=MagicMock()),
             "Bot.runtime": MagicMock(collect_download_codes=lambda payload: payload.get("downloadCodes", [])),
             "Utils.dingtalk_api": MagicMock(),
@@ -72,7 +76,7 @@ def _load_router_module():
         sys.modules["dingtalk_stream"].ChatbotHandler = object
         sys.modules["dingtalk_stream"].AckMessage = SimpleNamespace(STATUS_OK="OK")
         with patch("importlib.util.spec_from_file_location", return_value=_Spec()):
-            with patch("importlib.util.module_from_spec", return_value=pinxiang_mod):
+            with patch("importlib.util.module_from_spec", side_effect=lambda _spec: types.ModuleType("app_handler")):
                 spec.loader.exec_module(module)
     return module
 
@@ -90,6 +94,7 @@ class LogisticsRouterTests(unittest.TestCase):
         )
         self.router.pinxiang_handler.has_pending = MagicMock(return_value=False)
         self.router.lcl_handler.has_pending = MagicMock(return_value=False)
+        self.router.lcl_handler.has_logistics_session = MagicMock(return_value=False)
 
     def tearDown(self) -> None:
         self._path_patch.stop()
@@ -174,16 +179,30 @@ class LogisticsRouterTests(unittest.TestCase):
     def test_reset_command_resets_current_user(self):
         self.router._set_branch("u1", "split")
         self.assertEqual(self.router._route({"text": {"content": "重置"}}, user_id="u1"), "reset")
-        self.router._reset_user("u1")
+        asyncio.run(self.router._reset_user("u1"))
         self.assertNotIn("u1", self.router._selected_branch_by_user)
 
     def test_reset_keeps_ops_on_active_packing_job(self):
         """运营还有分仓单时，重置只清菜单，下一条仍进分仓。"""
         self.router._set_branch("u1", "pinxiang")
         self.router.lcl_handler.has_pending = MagicMock(return_value=True)
-        self.router._reset_user("u1")
+        asyncio.run(self.router._reset_user("u1"))
         self.assertEqual(self.router._route({"text": {"content": "模板2"}}, user_id="u1"), "lcl")
         self.assertEqual(self.router._route({"text": {"content": "1"}}, user_id="u1"), "lcl")
+
+    def test_reset_awaits_lcl_before_replying(self):
+        self.router._set_branch("u1", "lcl")
+        self.router._extract_user_id = lambda _payload: "u1"
+        self.router.lcl_handler.reset_logistics_for_user = AsyncMock()
+
+        async def reply(*_):
+            self.router.lcl_handler.reset_logistics_for_user.assert_awaited_once_with("u1")
+            self.assertNotIn("u1", self.router._selected_branch_by_user)
+
+        self.router._send_text = AsyncMock(side_effect=reply)
+        result = asyncio.run(self.router.process(SimpleNamespace(data={"senderStaffId": "u1", "text": {"content": "重置"}})))
+        self.assertEqual(result, ("OK", "RESET"))
+        self.router._send_text.assert_awaited_once()
 
     def test_active_pinxiang_wins_over_lcl(self):
         """两单都在时先做不分仓，分仓留在队列。"""
@@ -192,8 +211,6 @@ class LogisticsRouterTests(unittest.TestCase):
         self.assertEqual(self.router._route({"text": {"content": "模板2"}}, user_id="u1"), "pinxiang")
 
     def test_pinxiang_lcl_workbook_handoff_redispatches(self):
-        import asyncio
-
         self.router._set_branch("u1", "pinxiang")
         self.router._extract_user_id = lambda _payload: "u1"
         self.router._route = lambda _payload, user_id="": "pinxiang"

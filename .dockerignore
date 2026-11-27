@@ -18,3 +18,5 @@ deploy/deploy.env
 tests/
 *.md
 !apps/**/README.md
+.venv/
+.github/
