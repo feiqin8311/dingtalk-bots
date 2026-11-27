@@ -12,14 +12,14 @@
 
 ## 流程（摘要）
 
-1. **物流**上传发货单 → 机器人回拼箱结果（仅改箱行；文件名如 `SP… SP… 拼箱数据.xlsx`），并按 `templates/` 生成 Amazon Manifest 模板1  
+1. **物流**上传发货单 → 机器人回拼箱结果（仅改箱行；文件名如 `SP… SP… 拼箱数据.xlsx`），并按 `shared/amazon_templates/` 生成 Amazon Manifest 模板1  
 2. 物流可**上传修正版拼箱结果 Excel**（含「拼箱结果」表）→ 替换当前结果并重生成 Amazon 模板  
 3. 物流 **确认** → 选择运营（序号/姓名）；运营同时只接 1 单，忙则请改选  
 4. 机器人将**拼箱结果 + Amazon 模板1**私聊转发给运营（文案含物流渠道/店铺/国家）  
 5. 运营可回复 **【模板2】** 换 MPL2；也可上传卖家后台「包装箱包装信息」表，机器人填写后回传运营  
 
 
-模板源：`apps/pinxiang_bot/templates/`（与 `dingtalk-lcl-bot/Template_Files` 同款）。
+模板源：`shared/amazon_templates/`（两个拼箱分支共用）。
 
 ## 拼箱规则（摘要）
 

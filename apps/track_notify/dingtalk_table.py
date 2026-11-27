@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from shared.dingtalk_token import get_access_token as shared_get_access_token
+
 
 CST = timezone(timedelta(hours=8))
 _log = logging.getLogger("track_notify")
@@ -126,22 +128,13 @@ class DingTalkNotableClient:
         self.api_base_url = api_base_url.rstrip("/")
         self.timeout_sec = timeout_sec
         self.max_retries = max(1, max_retries)
-        self._token: str | None = None
-        self._token_expire_at = 0.0
 
     def get_access_token(self) -> str:
-        now = time.time()
-        if self._token and now < self._token_expire_at - 60:
-            return self._token
-        url = f"{self.api_base_url}/v1.0/oauth2/accessToken"
-        payload = {"appKey": self.app_key, "appSecret": self.app_secret}
-        data = self._request("POST", url, payload, auth=False)
-        token = data.get("accessToken") or data.get("access_token")
-        if not token:
-            raise RuntimeError(f"get accessToken failed: {data}")
-        self._token = token
-        self._token_expire_at = now + float(data.get("expireIn") or data.get("expires_in") or 7200)
-        return token
+        return shared_get_access_token(
+            self.app_key,
+            self.app_secret,
+            api_base_url=self.api_base_url,
+        )
 
     def _request(
         self,
