@@ -11,10 +11,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from gateway_client import (  # noqa: E402
+from apps.track_notify.gateway_client import (  # noqa: E402
     GatewayCircuitOpen,
     LogisticsGatewayClient,
     is_gateway_down_error,
@@ -76,7 +74,7 @@ class GatewayClientTests(unittest.TestCase):
             captured["key"] = req.headers.get("X-api-key") or req.headers.get("X-Api-Key")
             return FakeResponse(SAMPLE_AGL)
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             shipment = client.query_longzhou(
                 "AL0-UC54XYYFYNEW2", brand="YPLUS", platform="agl"
             )
@@ -103,7 +101,7 @@ class GatewayClientTests(unittest.TestCase):
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return FakeResponse(SAMPLE_AGL)
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             shipment = client.query_fba("FBA15LZG9QTX", platform="baosen")
 
         self.assertIsNotNone(shipment)
@@ -122,7 +120,7 @@ class GatewayClientTests(unittest.TestCase):
             captured["body"] = json.loads(req.data.decode("utf-8"))
             return FakeResponse(SAMPLE_AGL)
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             shipment = client.query_yinghe("YHE2605211007", platform="yinghe")
 
         self.assertIsNotNone(shipment)
@@ -141,7 +139,7 @@ class GatewayClientTests(unittest.TestCase):
                 {"success": False, "data": None, "error": "缺少物流编号"}
             )
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             with self.assertRaises(RuntimeError) as ctx:
                 client.query_fba("FBA15LZG9QTX", platform="baosen")
         self.assertIn("缺少物流编号", str(ctx.exception))
@@ -165,7 +163,7 @@ class GatewayClientTests(unittest.TestCase):
                 active -= 1
             return FakeResponse(SAMPLE_AGL)
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 futs = [
                     pool.submit(client.query_longzhou, f"AL0-{i}", brand="X")
@@ -185,7 +183,7 @@ class GatewayClientTests(unittest.TestCase):
             calls["n"] += 1
             raise TimeoutError("timed out")
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             for _ in range(3):
                 with self.assertRaises(TimeoutError):
                     client.query_longzhou("AL0-X", brand="X")
@@ -206,7 +204,7 @@ class GatewayClientTests(unittest.TestCase):
                 raise TimeoutError("timed out")
             return FakeResponse(SAMPLE_AGL)
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             for _ in range(2):
                 with self.assertRaises(TimeoutError):
                     client.query_longzhou("AL0-A", brand="X")
@@ -226,7 +224,7 @@ class GatewayClientTests(unittest.TestCase):
                 {"success": False, "data": None, "error": "缺少物流编号"}
             )
 
-        with patch("gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.gateway_client.urllib.request.urlopen", side_effect=fake_urlopen):
             with self.assertRaises(RuntimeError) as ctx:
                 client.query_fba("FBA15LZG9QTX", platform="baosen")
         self.assertIn("缺少物流编号", str(ctx.exception))

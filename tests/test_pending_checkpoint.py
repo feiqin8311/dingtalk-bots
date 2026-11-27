@@ -8,12 +8,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from dedup_store import CST, TrackStateStore, _utc_sqlite_to_cst_ymd  # noqa: E402
-from excel_export import ReportItem  # noqa: E402
-from runner import _checkpoint_bucket, _item_from_dict  # noqa: E402
+from apps.track_notify.dedup_store import CST, TrackStateStore, _utc_sqlite_to_cst_ymd  # noqa: E402
+from apps.track_notify.excel_export import ReportItem  # noqa: E402
+from apps.track_notify.runner import _checkpoint_bucket, _item_from_dict  # noqa: E402
 
 
 class PendingCheckpointTests(unittest.TestCase):
@@ -135,13 +133,7 @@ class PendingCheckpointTests(unittest.TestCase):
 
 class ScheduleAndDeliverTests(unittest.TestCase):
     def test_next_run_at_mon_wed_1000_and_catchup(self):
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("track_notify_main", APP / "main.py")
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(mod)
-        SCHEDULE_HOUR, _next_run_at = mod.SCHEDULE_HOUR, mod._next_run_at
+        from apps.track_notify.main import SCHEDULE_HOUR, _next_run_at
 
         self.assertEqual(SCHEDULE_HOUR, 10)
         mon_before = datetime(2026, 8, 3, 9, 59, 0, tzinfo=CST)
@@ -157,17 +149,10 @@ class ScheduleAndDeliverTests(unittest.TestCase):
         )
 
     def test_deliver_defers_mark_until_all_recipients_ok(self):
-        import importlib.util
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
 
-        from runner import _deliver_excel_reports
-
-        spec = importlib.util.spec_from_file_location("track_notify_settings", APP / "settings.py")
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        sys.modules["track_notify_settings"] = mod
-        spec.loader.exec_module(mod)
-        TrackNotifyConfig = mod.TrackNotifyConfig
+        from apps.track_notify.report_delivery import _deliver_excel_reports
+        from apps.track_notify.settings import TrackNotifyConfig
 
         def _cfg(state_dir: Path) -> TrackNotifyConfig:
             return TrackNotifyConfig(
@@ -200,12 +185,6 @@ class ScheduleAndDeliverTests(unittest.TestCase):
                 send_excel=True,
             )
 
-        def _install_notifier(notifier: MagicMock) -> None:
-            fake_mod = MagicMock()
-            fake_mod.DingTalkNotifier = MagicMock(return_value=notifier)
-            sys.modules["api"] = type(sys)("api")
-            sys.modules["api.dingtalk_client"] = fake_mod
-
         with tempfile.TemporaryDirectory() as td:
             state_dir = Path(td)
             store = TrackStateStore(state_dir / "t.sqlite3")
@@ -223,18 +202,18 @@ class ScheduleAndDeliverTests(unittest.TestCase):
             notifier.send_user_file.side_effect = lambda uid, _p: (
                 (_ for _ in ()).throw(RuntimeError("send fail")) if uid == "u2" else None
             )
-            _install_notifier(notifier)
-            stats = _deliver_excel_reports(
-                [item], config=config, store=store, dry_run=False, logger=MagicMock()
-            )
+            with patch("apps.cp_bot.api.dingtalk_client.DingTalkNotifier", return_value=notifier):
+                stats = _deliver_excel_reports(
+                    [item], config=config, store=store, dry_run=False, logger=MagicMock()
+                )
             self.assertGreaterEqual(stats["excel_failed"], 1)
             self.assertEqual(stats["excel_mark_deferred"], 1)
             self.assertFalse(store.has_event("AL0-1", "lz:pod"))
 
-            _install_notifier(MagicMock())
-            stats2 = _deliver_excel_reports(
-                [item], config=config, store=store, dry_run=False, logger=MagicMock()
-            )
+            with patch("apps.cp_bot.api.dingtalk_client.DingTalkNotifier"):
+                stats2 = _deliver_excel_reports(
+                    [item], config=config, store=store, dry_run=False, logger=MagicMock()
+                )
             self.assertEqual(stats2["excel_sent"], 2)
             self.assertEqual(stats2["excel_mark_deferred"], 0)
             self.assertTrue(store.has_event("AL0-1", "lz:pod"))

@@ -11,15 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "apps") not in sys.path:
-    sys.path.insert(0, str(ROOT / "apps"))
 
 
 class LclProcessSerializedTest(unittest.TestCase):
     def test_messages_never_overlap_even_when_handler_awaits(self):
         """Heavy lcl steps run in threads; the process lock must keep messages one-at-a-time,
         otherwise a 2nd shipment could slip past the 'logistics busy' check mid-packing."""
-        from lcl_bot.handlers import WorkflowBotHandler
+        from apps.lcl_bot.handlers import WorkflowBotHandler
 
         handler = WorkflowBotHandler.__new__(WorkflowBotHandler)  # skip DingTalk/state init
         handler._process_lock = asyncio.Lock()
@@ -49,8 +47,8 @@ class LclProcessSerializedTest(unittest.TestCase):
         self.assertEqual(results, [("OK", "a"), ("OK", "b")])
 
     def test_reset_waits_for_upload_and_preserves_operations_jobs(self):
-        from lcl_bot.handlers import WorkflowBotHandler
-        from lcl_bot.state_manager import StateManager
+        from apps.lcl_bot.handlers import WorkflowBotHandler
+        from apps.lcl_bot.state_manager import StateManager
 
         async def run(folder):
             handler = WorkflowBotHandler.__new__(WorkflowBotHandler)
@@ -90,8 +88,8 @@ class LclProcessSerializedTest(unittest.TestCase):
             asyncio.run(run(Path(tmp)))
 
     def test_slow_reply_does_not_block_other_messages(self):
-        from lcl_bot.handlers import WorkflowBotHandler
-        from lcl_bot.utils import DingTalkAPI
+        from apps.lcl_bot.handlers import WorkflowBotHandler
+        from apps.lcl_bot.utils import DingTalkAPI
 
         async def run():
             handler = WorkflowBotHandler.__new__(WorkflowBotHandler)
@@ -109,7 +107,7 @@ class LclProcessSerializedTest(unittest.TestCase):
 
             handler.dingtalk_api = DingTalkAPI("id", "secret")
             message = SimpleNamespace(session_webhook="https://webhook.test", sender_staff_id="staff")
-            with patch("lcl_bot.utils.requests.post", side_effect=post) as request:
+            with patch("apps.lcl_bot.utils.requests.post", side_effect=post) as request:
                 replying = asyncio.create_task(handler._send_text_reply("reply", message))
                 try:
                     await asyncio.wait_for(started.wait(), timeout=2)

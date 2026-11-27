@@ -8,11 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from dedup_store import TrackStateStore  # noqa: E402
-from dingtalk_table import CST, TableRow, _split_codes, _ts_to_date  # noqa: E402
+from apps.track_notify.dedup_store import TrackStateStore  # noqa: E402
+from apps.track_notify.dingtalk_table import CST, TableRow, _split_codes, _ts_to_date  # noqa: E402
 
 
 class DingTalkRequestRetryTests(unittest.TestCase):
@@ -20,7 +18,7 @@ class DingTalkRequestRetryTests(unittest.TestCase):
         import urllib.error
         from unittest.mock import MagicMock, patch
 
-        from dingtalk_table import DingTalkNotableClient
+        from apps.track_notify.dingtalk_table import DingTalkNotableClient
 
         client = DingTalkNotableClient(
             "k",
@@ -37,8 +35,8 @@ class DingTalkRequestRetryTests(unittest.TestCase):
             urllib.error.URLError("ssl timeout"),
             ok_resp,
         ]
-        with patch("dingtalk_table.urllib.request.urlopen", side_effect=side_effects) as m:
-            with patch("dingtalk_table.time.sleep"):
+        with patch("apps.track_notify.dingtalk_table.urllib.request.urlopen", side_effect=side_effects) as m:
+            with patch("apps.track_notify.dingtalk_table.time.sleep"):
                 data = client._request("POST", "https://example.test/x", {}, auth=False)
         self.assertEqual(data, {"records": []})
         self.assertEqual(m.call_count, 2)
@@ -47,7 +45,7 @@ class DingTalkRequestRetryTests(unittest.TestCase):
         import urllib.error
         from unittest.mock import patch
 
-        from dingtalk_table import DingTalkNotableClient
+        from apps.track_notify.dingtalk_table import DingTalkNotableClient
 
         client = DingTalkNotableClient(
             "k",
@@ -57,10 +55,10 @@ class DingTalkRequestRetryTests(unittest.TestCase):
             timeout_sec=1,
         )
         with patch(
-            "dingtalk_table.urllib.request.urlopen",
+            "apps.track_notify.dingtalk_table.urllib.request.urlopen",
             side_effect=urllib.error.URLError("ssl timeout"),
         ):
-            with patch("dingtalk_table.time.sleep"):
+            with patch("apps.track_notify.dingtalk_table.time.sleep"):
                 with self.assertRaises(RuntimeError) as ctx:
                     client._request("POST", "https://example.test/x", {}, auth=False)
         self.assertIn("after 2 tries", str(ctx.exception))
@@ -74,7 +72,7 @@ class CandidateFilterTests(unittest.TestCase):
     def test_blank_eta_included_future_eta_excluded(self):
         from unittest.mock import patch
 
-        from dingtalk_table import DingTalkNotableClient
+        from apps.track_notify.dingtalk_table import DingTalkNotableClient
 
         today = date(2026, 8, 24)
         shipped = _ms(date(2026, 5, 18))
@@ -135,7 +133,7 @@ class StoreTests(unittest.TestCase):
 
 class CarrierKindTests(unittest.TestCase):
     def test_carrier_kind(self):
-        from runner import _carrier_kind, _missing_key_line
+        from apps.track_notify.runner import _carrier_kind, _missing_key_line
 
         self.assertEqual(_carrier_kind("平谊物流"), "pingyi")
         self.assertEqual(_carrier_kind("龙舟AGL"), "longzhou")
@@ -145,7 +143,7 @@ class CarrierKindTests(unittest.TestCase):
         self.assertEqual(_carrier_kind("其他"), "unknown")
 
     def test_missing_fba_line(self):
-        from runner import _missing_key_line, _no_track_line, _query_fail_line
+        from apps.track_notify.runner import _missing_key_line, _no_track_line, _query_fail_line
 
         row = TableRow(
             record_id="r1",
@@ -187,7 +185,7 @@ class CarrierKindTests(unittest.TestCase):
 
 class NotifyRoutingTests(unittest.TestCase):
     def test_issue_only_kepengxiang(self):
-        from owners import KEPENGXIANG_USER_ID, notify_user_ids
+        from apps.track_notify.owners import KEPENGXIANG_USER_ID, notify_user_ids
 
         owners = [{"unionId": "iiCcejLysla6iiFFOiPD53DFwiEiE", "name": "乔丹丹"}]
         self.assertEqual(
@@ -196,7 +194,7 @@ class NotifyRoutingTests(unittest.TestCase):
         )
 
     def test_ok_owners_plus_kepengxiang(self):
-        from owners import KEPENGXIANG_USER_ID, notify_user_ids
+        from apps.track_notify.owners import KEPENGXIANG_USER_ID, notify_user_ids
 
         owners = [{"unionId": "iiCcejLysla6iiFFOiPD53DFwiEiE", "name": "乔丹丹"}]
         uids = notify_user_ids(owners, issue=False)
@@ -205,7 +203,7 @@ class NotifyRoutingTests(unittest.TestCase):
         self.assertEqual(len(uids), 2)
 
     def test_ok_no_owner_still_kepengxiang(self):
-        from owners import KEPENGXIANG_USER_ID, notify_user_ids
+        from apps.track_notify.owners import KEPENGXIANG_USER_ID, notify_user_ids
 
         self.assertEqual(
             notify_user_ids([], issue=False),

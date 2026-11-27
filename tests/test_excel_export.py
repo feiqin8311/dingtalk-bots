@@ -8,10 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from excel_export import (  # noqa: E402
+from apps.track_notify.excel_export import (  # noqa: E402
     HEADERS,
     ReportItem,
     detail_line_has_date,
@@ -21,7 +19,7 @@ from excel_export import (  # noqa: E402
     split_detail_columns,
     write_report_xlsx,
 )
-from owners import KEPENGXIANG_USER_ID  # noqa: E402
+from apps.track_notify.owners import KEPENGXIANG_USER_ID  # noqa: E402
 from openpyxl import load_workbook  # noqa: E402
 from datetime import datetime  # noqa: E402
 

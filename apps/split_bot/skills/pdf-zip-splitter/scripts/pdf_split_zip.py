@@ -8,7 +8,7 @@ from pathlib import Path
 
 def _find_repo_root(start: Path) -> Path:
     for candidate in [start, *start.parents]:
-        if (candidate / 'pdf_zip_bot').is_dir():
+        if (candidate / 'apps' / 'split_bot' / 'pdf_zip_bot').is_dir():
             return candidate
     raise RuntimeError('Could not locate repo root containing pdf_zip_bot')
 
@@ -17,7 +17,7 @@ REPO_ROOT = _find_repo_root(Path(__file__).resolve())
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from pdf_zip_bot import parse_rules_table, process_pdf_to_zip  # noqa: E402
+from apps.split_bot.pdf_zip_bot import parse_rules_table, process_pdf_to_zip  # noqa: E402
 
 
 def run(source_pdf: str | Path, rules_file: str | Path, output_dir: str | Path) -> Path:

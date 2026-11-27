@@ -15,8 +15,6 @@ def find_repo_root(start: Path) -> Path:
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = find_repo_root(APP_DIR)
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
 
 from shared.env import load_env_files
 

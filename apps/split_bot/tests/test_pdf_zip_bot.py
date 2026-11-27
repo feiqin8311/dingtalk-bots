@@ -7,7 +7,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from pypdf import PdfReader, PdfWriter
 
-from pdf_zip_bot import (
+from apps.split_bot.pdf_zip_bot import (
     RuleParseError,
     build_rules_from_workbook,
     format_rule_preview_markdown,
@@ -330,7 +330,7 @@ class ProcessPdfToZipTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-from pdf_zip_bot.messages import MessageFormatError, extract_rules_text_from_message
+from apps.split_bot.pdf_zip_bot.messages import MessageFormatError, extract_rules_text_from_message
 
 
 class MessageParsingTests(unittest.TestCase):

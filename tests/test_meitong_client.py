@@ -9,10 +9,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from meitong_client import MeitongClient  # noqa: E402
+from apps.track_notify.meitong_client import MeitongClient  # noqa: E402
 
 
 SAMPLE_TRACK = {
@@ -63,7 +61,7 @@ class MeitongClientTests(unittest.TestCase):
         def fake_urlopen(req, timeout=0):
             return FakeResponse(SAMPLE_TRACK)
 
-        with patch("meitong_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.meitong_client.urllib.request.urlopen", side_effect=fake_urlopen):
             shipment = client.get_track("SHGB2607012839")
 
         assert shipment is not None
@@ -85,5 +83,5 @@ class MeitongClientTests(unittest.TestCase):
         def fake_urlopen(req, timeout=0):
             return FakeResponse(payload)
 
-        with patch("meitong_client.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("apps.track_notify.meitong_client.urllib.request.urlopen", side_effect=fake_urlopen):
             self.assertIsNone(client.get_track("FBA15M0LXDZM"))

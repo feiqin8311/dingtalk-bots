@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dingtalk-bots"
+version = "0.1.0"
+description = "DingTalk logistics bots monorepo"
+requires-python = ">=3.11,<3.12"
+dynamic = ["dependencies"]
+
+[tool.setuptools.packages.find]
+include = ["apps", "apps.*", "shared"]
+exclude = ["*.tests", "*.tests.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+shared = ["amazon_templates/*.xlsx"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "apps"]
+pythonpath = ["."]
+addopts = "-ra"

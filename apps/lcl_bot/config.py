@@ -57,9 +57,7 @@ LOGISTICS_USERS = [uid.strip() for uid in _logistics_users_str.split(",") if uid
 
 # 流程四运营与流程三共用：PINXIANG_OPS_USERS + pinxiang 默认名单（不再单独 LCL_OPERATION_USERS）
 _pinxiang_dir = str(MONOREPO_ROOT / "apps" / "pinxiang_bot")
-if _pinxiang_dir not in sys.path:
-    sys.path.insert(0, _pinxiang_dir)
-from pinxiang_config import OPS_USERS as OPS_USERS  # noqa: E402
+from apps.pinxiang_bot.pinxiang_config import OPS_USERS as OPS_USERS  # noqa: E402
 
 # 兼容旧代码：纯 userId 列表
 OPERATION_USERS = [u["user_id"] for u in OPS_USERS]

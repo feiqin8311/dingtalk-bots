@@ -8,12 +8,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "apps" / "track_notify"
-if str(APP) not in sys.path:
-    sys.path.insert(0, str(APP))
 
-from dedup_store import TrackStateStore  # noqa: E402
-from dingtalk_table import TableRow  # noqa: E402
-from milestones import (  # noqa: E402
+from apps.track_notify.dedup_store import TrackStateStore  # noqa: E402
+from apps.track_notify.dingtalk_table import TableRow  # noqa: E402
+from apps.track_notify.milestones import (  # noqa: E402
     event_has_date,
     filter_new_milestones,
     match_milestone,
@@ -21,8 +19,8 @@ from milestones import (  # noqa: E402
     milestone_label,
     notify_event_key,
 )
-from pingyi_client import TrackEvent, TrackShipment  # noqa: E402
-from runner import _emit_events  # noqa: E402
+from apps.track_notify.pingyi_client import TrackEvent, TrackShipment  # noqa: E402
+from apps.track_notify.runner import _emit_events  # noqa: E402
 
 
 def _ev(desc: str, *, code: str = "", when: str = "2026-07-01") -> TrackEvent:

@@ -13,77 +13,19 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-ROOT = Path(__file__).resolve().parents[1]
-LOGISTICS_DIR = ROOT / "apps" / "logistics_bot"
-if str(LOGISTICS_DIR) not in sys.path:
-    sys.path.insert(0, str(LOGISTICS_DIR))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-
-def _load_router_module():
-    spec = importlib.util.spec_from_file_location("logistics_router_for_tests", LOGISTICS_DIR / "router.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-
-    pinxiang_mod = types.ModuleType("pinxiang_bot_handler")
-
-    def _make_handler(*_a, **_k):
-        h = MagicMock()
-        h.has_pending = MagicMock(return_value=False)
-        return h
-
-    pinxiang_mod.PinxiangBotHandler = MagicMock(side_effect=_make_handler)
-
-    lcl_handlers_mod = types.ModuleType("lcl_bot.handlers")
-    lcl_handlers_mod.WorkflowBotHandler = MagicMock(side_effect=_make_handler)
-    lcl_pkg = types.ModuleType("lcl_bot")
-    lcl_pkg.handlers = lcl_handlers_mod
-
-    cp_handler_cls = MagicMock()
-
-    class _Loader:
-        # router loads both cp_bot and pinxiang_bot handler.py by file path through this hook
-        def exec_module(self, mod):
-            mod.ShipmentQueryHandler = cp_handler_cls
-            mod.PinxiangBotHandler = pinxiang_mod.PinxiangBotHandler
-
-    class _Spec:
-        loader = _Loader()
-
-    settings_spec = importlib.util.spec_from_file_location("settings", LOGISTICS_DIR / "settings.py")
-    settings_mod = importlib.util.module_from_spec(settings_spec)
-    assert settings_spec.loader is not None
-    sys.modules["settings"] = settings_mod
-    settings_spec.loader.exec_module(settings_mod)
-
-    with patch.dict(
-        sys.modules,
-        {
-            "settings": settings_mod,
-            "dingtalk_stream": MagicMock(),
-            "dingtalk_stream.chatbot": MagicMock(),
-            "Bot.handler": MagicMock(PdfSplitBotHandler=MagicMock()),
-            "Bot.runtime": MagicMock(collect_download_codes=lambda payload: payload.get("downloadCodes", [])),
-            "Utils.dingtalk_api": MagicMock(),
-            "pinxiang_bot_handler": pinxiang_mod,
-            "lcl_bot": lcl_pkg,
-            "lcl_bot.handlers": lcl_handlers_mod,
-            "fba_label_bot": types.ModuleType("fba_label_bot"),
-            "fba_label_bot.handler": SimpleNamespace(FbaLabelBotHandler=MagicMock(side_effect=_make_handler)),
-        },
-    ):
-        sys.modules["dingtalk_stream"].ChatbotHandler = object
-        sys.modules["dingtalk_stream"].AckMessage = SimpleNamespace(STATUS_OK="OK")
-        with patch("importlib.util.spec_from_file_location", return_value=_Spec()):
-            with patch("importlib.util.module_from_spec", side_effect=lambda _spec: types.ModuleType("app_handler")):
-                spec.loader.exec_module(module)
-    return module
+from apps.logistics_bot import router
 
 
 class LogisticsRouterTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.module = _load_router_module()
+        self.module = router
+        for name in ("ShipmentQueryHandler", "PdfSplitBotHandler", "PinxiangBotHandler", "LclBotHandler", "FbaLabelBotHandler"):
+            patcher = patch.object(router, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(router, "collect_download_codes", side_effect=lambda payload: payload.get("downloadCodes", []))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self._state_dir = Path(tempfile.mkdtemp())
         self._state_path = self._state_dir / "selected_branch.json"
         self._path_patch = patch.object(self.module, "_BRANCH_STATE_PATH", self._state_path)
@@ -201,7 +143,7 @@ class LogisticsRouterTests(unittest.TestCase):
 
         self.router._send_text = AsyncMock(side_effect=reply)
         result = asyncio.run(self.router.process(SimpleNamespace(data={"senderStaffId": "u1", "text": {"content": "重置"}})))
-        self.assertEqual(result, ("OK", "RESET"))
+        self.assertEqual(result, (router.AckMessage.STATUS_OK, "RESET"))
         self.router._send_text.assert_awaited_once()
 
     def test_active_pinxiang_wins_over_lcl(self):

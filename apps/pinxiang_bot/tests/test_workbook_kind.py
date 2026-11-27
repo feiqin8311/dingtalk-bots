@@ -8,10 +8,8 @@ from pathlib import Path
 from openpyxl import Workbook
 
 APP_DIR = Path(__file__).resolve().parents[1]
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
-from handler import PinxiangBotHandler  # noqa: E402
+from apps.pinxiang_bot.handler import PinxiangBotHandler  # noqa: E402
 
 
 def _xlsx_with_sheets(*names: str) -> Path:

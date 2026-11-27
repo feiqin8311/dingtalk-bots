@@ -11,8 +11,8 @@ import dingtalk_stream
 import requests
 from dingtalk_stream import AckMessage
 
-from Bot.runtime import MessageDeduplicator, collect_download_codes, collect_file_names_by_download_code
-from Utils.dingtalk_api import get_token, send_robot_private_file_message, send_robot_private_text_message
+from apps.split_bot.Bot.runtime import MessageDeduplicator, collect_download_codes, collect_file_names_by_download_code
+from apps.split_bot.Utils.dingtalk_api import get_token, send_robot_private_file_message, send_robot_private_text_message
 
 from .cleaner import clean_pdf_bytes, output_file_name
 

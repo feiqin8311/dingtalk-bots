@@ -39,7 +39,6 @@ PINXIANG_OPS_USERS=袁皓冉:17839075860894598,陈潇潇:17403614178121993
 ## 本地 CLI（仅拼箱）
 
 ```bash
-cd apps/pinxiang_bot
-python cli.py /path/to/发货单.xlsx
-# 默认输出 output/
+python -m apps.pinxiang_bot.cli /path/to/发货单.xlsx
+# 默认输出 apps/pinxiang_bot/output/
 ```

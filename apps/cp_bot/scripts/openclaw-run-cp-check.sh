@@ -14,4 +14,4 @@ docker run --rm --network host \
   -v "$app_dir/downloads:/app/downloads" \
   -v "$app_dir/files:/app/files:ro" \
   "$image_name" \
-  python openclaw_check.py "$@"
+  python -m apps.cp_bot.openclaw_check "$@"

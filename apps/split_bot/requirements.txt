@@ -1,5 +1,1 @@
-pypdf
-openpyxl
-alibabacloud-dingtalk
-dingtalk-stream
-websockets
+-r ../../requirements.lock

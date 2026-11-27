@@ -7,10 +7,8 @@ import unittest
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parents[1]
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
-from product_info_source import _is_smb_path, _parse_smb_path  # noqa: E402
+from apps.pinxiang_bot.product_info_source import _is_smb_path, _parse_smb_path  # noqa: E402
 
 SHARE_FILE = "smb://192.168.0.45/供应链管理/2 物流发货管理/17.单证数据表维护/产品信息单证专用.xlsx"
 UNC_FILE = r"\\192.168.0.45\供应链管理\2 物流发货管理\17.单证数据表维护\产品信息单证专用.xlsx"

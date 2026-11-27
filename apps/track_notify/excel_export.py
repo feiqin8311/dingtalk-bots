@@ -176,7 +176,7 @@ def write_report_xlsx(items: Iterable[ReportItem], path: Path) -> Path:
 
 def export_filename(*, user_id: str = "", when: datetime | None = None) -> str:
     """例：乔丹丹_轨迹回传_20260805_114336.xlsx（含时分秒，避免同日多次跑互相覆盖）。"""
-    from owners import display_name
+    from apps.track_notify.owners import display_name
 
     when = when or datetime.now()
     stamp = when.strftime("%Y%m%d_%H%M%S")

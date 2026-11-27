@@ -18,10 +18,6 @@ def _find_repo_root(start: Path) -> Path:
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = _find_repo_root(APP_DIR)
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
 from shared.env import load_env_files, monorepo_env_paths  # noqa: E402
 
@@ -90,7 +86,7 @@ AMAZON_TEMPLATE_MPL3 = Path(
 
 def amazon_template_mpl(country: str = "") -> Path:
     """模板1：加拿大用 MPL3，其它用 MPL。"""
-    from amazon_export import _use_imperial
+    from apps.pinxiang_bot.amazon_export import _use_imperial
 
     if not _use_imperial(country):
         return AMAZON_TEMPLATE_MPL3
@@ -99,7 +95,7 @@ def amazon_template_mpl(country: str = "") -> Path:
 
 def amazon_template_mpl2(country: str = "") -> Path:
     """模板2：加拿大仍用 MPL3 壳；美国用 MPL2。"""
-    from amazon_export import _use_imperial
+    from apps.pinxiang_bot.amazon_export import _use_imperial
 
     if not _use_imperial(country):
         return AMAZON_TEMPLATE_MPL3

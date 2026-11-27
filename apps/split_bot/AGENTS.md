@@ -2,15 +2,15 @@
 
 This app is maintained inside the active monorepo:
 
-`/home/yida/Project/dingtalk-bots`
+`/Users/kerden/Projects/yida/dingtalk-bots`
 
 Project memory is maintained at:
 
-`/home/yida/Project/ai-memory/projects/dingtalk-bots/`
+`repository documentation`
 
 Before meaningful maintenance work, read:
 
-- `/home/yida/Project/ai-memory/AGENTS.md`
-- `/home/yida/Project/ai-memory/projects/dingtalk-bots/index.md`
+- `repository documentation/AGENTS.md`
+- `repository documentationindex.md`
 
 Source code is the highest source of truth. If memory conflicts with code, inspect code and update memory after the task.

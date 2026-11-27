@@ -6,8 +6,6 @@ LingXing OpenAPI helper for shipment deletion.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import time
 from typing import Any, Dict, List, Optional
@@ -15,62 +13,15 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 
 from . import config
+from shared.lingxing import fetch_access_token, generate_sign
 
-try:
-    from Crypto.Cipher import AES
-except Exception:  # pragma: no cover - optional dependency
-    AES = None
 
-BLOCK_SIZE = 16
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 class LingXingApiError(RuntimeError):
     """LingXing API error."""
-
-
-def _pad(text: str) -> str:
-    pad_len = BLOCK_SIZE - len(text) % BLOCK_SIZE
-    return text + (pad_len * chr(pad_len))
-
-
-def _aes_encrypt(key: str, data: str) -> str:
-    if AES is None:
-        raise LingXingApiError("缺少Crypto依赖，无法执行领星签名加密")
-    cipher = AES.new(key.encode('utf-8'), AES.MODE_ECB)
-    padded = _pad(data)
-    encrypted = cipher.encrypt(padded.encode('utf-8'))
-    return base64.b64encode(encrypted).decode('utf-8')
-
-
-def _md5_encrypt(text: str) -> str:
-    md = hashlib.md5()
-    md.update(text.encode('utf-8'))
-    return md.hexdigest()
-
-
-def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
-
-
-def _format_params(params: Optional[Dict[str, Any]]) -> str:
-    if not params:
-        return ''
-    canonical = []
-    for key in sorted(params.keys()):
-        value = params[key]
-        if value == "":
-            continue
-        if isinstance(value, (dict, list)):
-            canonical.append(f"{key}={_json_dumps(value)}")
-        else:
-            canonical.append(f"{key}={value}")
-    return "&".join(canonical)
-
-
-def _generate_sign(app_key: str, request_params: Dict[str, Any]) -> str:
-    canonical_querystring = _format_params(request_params)
-    md5_str = _md5_encrypt(canonical_querystring).upper()
-    return _aes_encrypt(app_key, md5_str)
 
 
 class LingXingClient:
@@ -89,15 +40,10 @@ class LingXingClient:
             )
 
     async def _get_access_token(self) -> str:
-        async with aiohttp.ClientSession(trust_env=True) as session:
-            async with session.post(self.token_url, json={"api_key": self.token_key}, ssl=self.ssl_verify) as resp:
-                if resp.status != 200:
-                    raise LingXingApiError(f"获取领星token失败，状态码: {resp.status}")
-                token_resp = await resp.json()
-        access_token = token_resp.get("access_token")
-        if not access_token:
-            raise LingXingApiError("获取领星token失败，返回中未包含 access_token")
-        return access_token
+        try:
+            return await fetch_access_token(self.token_url, self.token_key, ssl=self.ssl_verify)
+        except RuntimeError as exc:
+            raise LingXingApiError(str(exc)) from exc
 
     async def request(self, route_name: str, method: str = "POST",
                       req_params: Optional[Dict[str, Any]] = None,
@@ -116,7 +62,7 @@ class LingXingClient:
         gen_sign_params.update(req_params)
         gen_sign_params.update(sign_params)
 
-        sign = _generate_sign(self.app_key, gen_sign_params)
+        sign = generate_sign(self.app_key, gen_sign_params)
         req_params.update(sign_params)
         req_params["sign"] = sign
 

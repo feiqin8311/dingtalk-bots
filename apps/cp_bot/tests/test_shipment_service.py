@@ -1,6 +1,6 @@
 import unittest
 
-from shipment_service import fetch_shipment_detail_with_fallback
+from apps.cp_bot.shipment_service import fetch_shipment_detail_with_fallback
 
 
 class FakeLingXingClient:

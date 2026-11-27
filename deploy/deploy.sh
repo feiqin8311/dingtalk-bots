@@ -2,7 +2,7 @@
 # Deploy dingtalk-bots to the server.
 #
 # Default (code-only): rsync source + restart container  (~seconds, no pip)
-# Full rebuild:        ./deploy/deploy.sh --rebuild     (when requirements.txt changes)
+# Full rebuild:        ./deploy/deploy.sh --rebuild     (when dependencies or Docker entrypoints change)
 #
 # Usage:
 #   ./deploy/deploy.sh

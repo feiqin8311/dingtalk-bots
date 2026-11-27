@@ -4,12 +4,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-APP_DIR = Path(__file__).resolve().parent
-ROOT_DIR = APP_DIR.parent.parent
-for path in (str(APP_DIR), str(ROOT_DIR), str(ROOT_DIR / "apps" / "split_bot")):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
 from shared.dedup import MessageDeduplicator  # noqa: E402
 
 

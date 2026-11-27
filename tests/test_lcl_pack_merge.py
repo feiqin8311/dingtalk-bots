@@ -9,10 +9,8 @@ import pandas as pd
 from openpyxl import Workbook, load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "apps") not in sys.path:
-    sys.path.insert(0, str(ROOT / "apps"))
 
-from lcl_bot.processor import PackingBoxProcessor  # noqa: E402
+from apps.lcl_bot.processor import PackingBoxProcessor  # noqa: E402
 
 
 class LclPackMergeTest(unittest.TestCase):

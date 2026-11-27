@@ -16,4 +16,4 @@ services:
     volumes:
       - ./downloads:/app/downloads
       - ./files:/app/files:ro
-    command: ["python", "app.py"]
+    command: ["python", "-m", "apps.cp_bot.app"]

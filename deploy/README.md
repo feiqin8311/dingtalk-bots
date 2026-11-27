@@ -9,13 +9,13 @@
 流程：`rsync` 源码 → `docker compose up --force-recreate --no-build`  
 **不跑 pip**，通常十几秒。容器通过 volume 挂载 `apps/` 与 `shared/`。
 
-## 依赖变更（改了 requirements.txt）
+## 依赖、Dockerfile 或启动入口变更
 
 ```bash
 ./deploy/deploy.sh --rebuild
 ```
 
-走服务器代理 `http://172.17.0.1:20171`（sing-box）装包。
+应用包迁移后首次部署请重建镜像。构建走服务器代理 `http://172.17.0.1:20171`（sing-box）装包。
 
 ## 配置
 

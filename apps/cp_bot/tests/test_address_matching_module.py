@@ -1,6 +1,6 @@
 import unittest
 
-from address_matching import (
+from apps.cp_bot.address_matching import (
     AddressRecord,
     detect_country_mode_by_nation,
     normalize_fc_code,

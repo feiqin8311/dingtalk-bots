@@ -14,5 +14,27 @@ jobs:
         with:
           python-version: "3.11"  # matches the Docker image
           cache: pip
-      - run: pip install -r requirements.txt pytest pyyaml
+      - run: pip install -r requirements.lock pytest
       - run: scripts/run_tests.sh
+
+  containers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: logistics
+            module: apps.logistics_bot.main
+          - name: cp
+            module: apps.cp_bot.app
+          - name: split
+            module: apps.split_bot.main
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and import the entrypoint
+        run: |
+          docker build -f Dockerfile.${{ matrix.name }} \
+            --build-arg PIP_INDEX_URL=https://pypi.org/simple \
+            ${{ matrix.name != 'split' && '--build-arg APT_MIRROR_URL=https://deb.debian.org' || '' }} \
+            -t bot-test .
+          docker run --rm bot-test python -c 'import ${{ matrix.module }}'

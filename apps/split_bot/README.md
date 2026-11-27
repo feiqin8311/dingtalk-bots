@@ -1,9 +1,9 @@
 # PDF ZIP Bot
 
-> Monorepo note: this app is maintained under `/home/yida/Project/dingtalk-bots`.
+> Monorepo note: this app is maintained under `/Users/kerden/Projects/yida/dingtalk-bots`.
 > Prefer running Docker from the monorepo root with `docker compose up -d --build`.
 >
-> 单仓库说明：本应用维护于 `/home/yida/Project/dingtalk-bots`。
+> 单仓库说明：本应用维护于 `/Users/kerden/Projects/yida/dingtalk-bots`。
 > Docker 推荐从单仓库根目录执行 `docker compose up -d --build`。
 
 This project implements the planned first stage: a reusable PDF split-and-package core plus a DingTalk stream bot entrypoint modeled after your existing `Dingtalk-Gpt-Bot2` layout.
@@ -28,7 +28,7 @@ Rows for the same company are merged into one output PDF named `公司名-一式
 ## CLI
 
 ```bash
-python -m pdf_zip_bot.cli FBA15LNH9GT5-1776059871368.pdf rules.txt --output-dir output
+python -m apps.split_bot.pdf_zip_bot.cli FBA15LNH9GT5-1776059871368.pdf apps/split_bot/rules.txt --output-dir output
 ```
 
 The command generates:
@@ -39,8 +39,8 @@ The command generates:
 ## DingTalk stream bot
 
 ```bash
-cp env.example .env
-python main.py
+cp apps/split_bot/env.example apps/split_bot/.env
+python -m apps.split_bot.main
 ```
 
 Robot message format:
@@ -89,10 +89,10 @@ If only one file has arrived so far, the bot stores it temporarily and replies w
 2. Build and start the bot:
 
 ```bash
-docker compose up -d --build
+docker compose --profile legacy up -d --build dingtalk-split-bot
 ```
 
-The Docker image installs Python packages from the Tsinghua PyPI mirror to reduce timeout issues on China mainland servers.
+The Docker image installs Python packages from the Aliyun PyPI mirror to reduce timeout issues on China mainland servers.
 
 3. Check logs:
 

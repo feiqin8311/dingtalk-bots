@@ -15,8 +15,8 @@ from typing import Sequence, Union
 
 from openpyxl import load_workbook
 
-from amazon_export import _use_imperial  # noqa: E402
-from packing import PackingRow
+from apps.pinxiang_bot.amazon_export import _use_imperial  # noqa: E402
+from apps.pinxiang_bot.packing import PackingRow
 
 PathLike = Union[str, Path]
 

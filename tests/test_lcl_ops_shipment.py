@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,11 +7,8 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT / "apps") not in sys.path:
-    sys.path.insert(0, str(ROOT / "apps"))
-
-from lcl_bot.handlers import WorkflowBotHandler  # noqa: E402
+from apps.lcl_bot.handlers import WorkflowBotHandler
+from apps.lcl_bot.workbooks import _load_modified_packing_result
 
 
 class LclOpsShipmentTest(unittest.TestCase):
@@ -66,7 +62,7 @@ class LclOpsShipmentTest(unittest.TestCase):
                     "单箱理论高": [54.94, None, 31, 27.8],
                 },
             )
-            out = self.h._load_modified_packing_result(str(path))
+            out = _load_modified_packing_result(str(path))
 
         by_sku = out.set_index("SKU")
         self.assertEqual(by_sku.loc["804011", "实际箱数"], 5)

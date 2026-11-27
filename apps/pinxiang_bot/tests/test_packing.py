@@ -10,10 +10,8 @@ import unittest
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parents[1]
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
-from packing import (  # noqa: E402
+from apps.pinxiang_bot.packing import (  # noqa: E402
     LineItem,
     TEMPLATE1_SHEET,
     _build_line_items,
@@ -23,11 +21,7 @@ from packing import (  # noqa: E402
     write_packing_workbook,
 )
 
-SAMPLE_SHIPMENT = Path("/Users/kerden/Desktop/不分仓拼箱/参考表格/发货单-938438362569883648.xlsx")
-TEST_SHIPMENT = Path("/Users/kerden/Desktop/测试数据/发货单-943520755484897280.xlsx")
-TEST_EXPECTED = Path(
-    "/Users/kerden/Desktop/测试数据/SP260805013 SP260805012 SP260805011 SP260805008 拼箱数据.xlsx"
-)
+from .workbook_samples import write_shipment
 
 
 def _item(**kwargs) -> LineItem:
@@ -250,15 +244,14 @@ class PackingLogicTests(unittest.TestCase):
         result = compute_packing([])
         self.assertEqual(result.result_basename(fallback="发货单-xxx"), "发货单-xxx 拼箱数据")
 
-    @unittest.skipUnless(SAMPLE_SHIPMENT.is_file(), "sample shipment not on this machine")
     def test_sample_shipment_file(self):
-        result = process_shipment_file(SAMPLE_SHIPMENT)
-        self.assertEqual(len(result.rows), 3)
-        skus = {r.sku for r in result.rows}
-        self.assertEqual(skus, {"801905N", "80376351F1"})
         with tempfile.TemporaryDirectory() as tmp:
+            result = process_shipment_file(write_shipment(Path(tmp) / "shipment.xlsx"))
+            self.assertEqual([r.sku for r in result.rows], ["PART"])
+            self.assertEqual(result.shipment_sns, ["SPTEST1"])
+            self.assertEqual((result.country, result.store_name, result.logistics_channel), ("美国", "测试店铺", "测试渠道"))
             out = write_packing_workbook(result, Path(tmp) / "out.xlsx")
-            self.assertTrue(out.is_file())
+            self.assertEqual([r.sku for r in load_packing_result_workbook(out).rows], ["PART"])
 
     def test_template1_sheet_full_before_partial(self):
         result = compute_packing(
@@ -267,7 +260,7 @@ class PackingLogicTests(unittest.TestCase):
                 _item(sku="PART", qty=5, units_per_box=20, box_weight_kg=10),
             ]
         )
-        from packing import _build_template1_rows
+        from apps.pinxiang_bot.packing import _build_template1_rows
 
         items = [
             _item(sku="FULL", qty=100, units_per_box=20, box_weight_kg=10, length_cm=40, width_cm=30, height_cm=20),
@@ -300,30 +293,13 @@ class PackingLogicTests(unittest.TestCase):
             self.assertIsNone(ws.cell(3, 5).value)
             wb.close()
 
-    @unittest.skipUnless(
-        TEST_SHIPMENT.is_file() and TEST_EXPECTED.is_file(),
-        "desktop test fixtures not on this machine",
-    )
-    def test_template1_matches_desktop_sample(self):
-        result = process_shipment_file(TEST_SHIPMENT)
-        self.assertEqual(len(result.template1_rows), 33)
-        full = [r for r in result.template1_rows if r.is_full_box]
-        partial = [r for r in result.template1_rows if not r.is_full_box]
-        self.assertEqual(len(full), 21)
-        self.assertEqual(len(partial), 12)
-        # 整箱在前、非整箱在后
-        self.assertTrue(all(r.is_full_box for r in result.template1_rows[:21]))
-        self.assertTrue(all(not r.is_full_box for r in result.template1_rows[21:]))
-        from openpyxl import load_workbook
-
-        exp = load_workbook(TEST_EXPECTED, data_only=True)[TEMPLATE1_SHEET]
-        got_skus = [(r.is_full_box, r.sku, r.qty) for r in result.template1_rows]
-        exp_skus = []
-        for row in exp.iter_rows(min_row=2, values_only=True):
-            if not row or not row[2]:
-                continue
-            exp_skus.append((row[0] == "是", str(row[2]), float(row[3])))
-        self.assertEqual(got_skus, exp_skus)
+    def test_template1_preserves_quantities_and_full_box_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = process_shipment_file(write_shipment(Path(tmp) / "shipment.xlsx"))
+        self.assertEqual(
+            [(r.is_full_box, r.sku, r.qty, r.units_per_box) for r in result.template1_rows],
+            [(True, "FULL", 40, 20), (False, "PART", 5, None)],
+        )
 
 
 if __name__ == "__main__":

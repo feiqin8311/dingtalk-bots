@@ -17,7 +17,7 @@ import pandas as pd
 from dingtalk_stream import AckMessage
 import dingtalk_stream
 
-from . import config
+from . import config, workbooks
 from .lingxing_helper import delete_shipment_list
 from .processor import PackingBoxProcessor
 from .shipment_registry import extract_shipment_info
@@ -605,7 +605,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         return result_path, template_path
 
     def _prepare_modified_packing_result(self, modified_file_path: str, workflow_folder: str):
-        merge_summary = self._load_modified_packing_result(modified_file_path)
+        merge_summary = workbooks._load_modified_packing_result(modified_file_path)
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         base_name, ext = os.path.splitext(os.path.basename(modified_file_path))
@@ -628,71 +628,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
         temp_processor.create_amazon_template(template_path, merge_summary)
 
         return result_path, template_path
-
-    def _load_modified_packing_result(self, file_path: str) -> pd.DataFrame:
-        """读取并校验修正版拼箱结果"""
-        sheet_name = '拼箱计算结果'
-        try:
-            merge_summary = pd.read_excel(file_path, sheet_name=sheet_name)
-        except ValueError as exc:
-            if sheet_name in str(exc):
-                raise ValueError(f"缺少工作表：{sheet_name}") from exc
-            raise
-
-        required_columns = [
-            'SKU',
-            '发货数量',
-            '单份数量',
-            '小组名称',
-            '单箱重量',
-            '单箱理论长',
-            '单箱理论宽',
-            '单箱理论高',
-        ]
-        missing_columns = [col for col in required_columns if col not in merge_summary.columns]
-        if missing_columns:
-            raise ValueError(f"缺少必要列：{', '.join(missing_columns)}")
-
-        merge_summary = merge_summary.copy()
-        fill_columns = ['小组名称', '单箱重量', '单箱理论长', '单箱理论宽', '单箱理论高']
-        for col in fill_columns:
-            merge_summary[col] = merge_summary[col].ffill()
-
-        sku_series = merge_summary['SKU'].dropna().map(lambda value: str(value).strip())
-        merge_summary = merge_summary.loc[sku_series[sku_series != ''].index].copy()
-        if merge_summary.empty:
-            raise ValueError("拼箱计算结果中没有可用的SKU行")
-
-        # 写出时同组「实际箱数」是合并单元格；新拆出的组也可能漏填。
-        # 不能按列 ffill：单独装箱共用小组名但箱数不同。空值按 发货数量/单份数量 反推。
-        if '实际箱数' in merge_summary.columns:
-            actual = pd.to_numeric(merge_summary['实际箱数'], errors='coerce')
-            missing = actual.isna()
-            if missing.any():
-                inferred = pd.to_numeric(
-                    merge_summary.apply(PackingBoxProcessor._infer_actual_box_count, axis=1),
-                    errors='coerce',
-                )
-                inferred = inferred.where(inferred > 0)
-                actual = actual.where(~missing, inferred)
-            merge_summary['实际箱数'] = actual
-
-        numeric_columns = ['发货数量', '单份数量', '单箱重量', '单箱理论长', '单箱理论宽', '单箱理论高']
-        if '箱数' in merge_summary.columns:
-            numeric_columns.append('箱数')
-        if '实际箱数' in merge_summary.columns:
-            numeric_columns.append('实际箱数')
-        invalid_columns = []
-        for col in numeric_columns:
-            converted = pd.to_numeric(merge_summary[col], errors='coerce')
-            if converted.isna().any():
-                invalid_columns.append(col)
-            else:
-                merge_summary[col] = converted
-        if invalid_columns:
-            raise ValueError(f"以下列存在非数字或空值：{', '.join(invalid_columns)}")
-
-        return merge_summary
 
     async def _handle_confirmation(self, incoming_message, user_role: str):
         """处理物流人员的确认 → 进入选运营"""
@@ -1231,7 +1166,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             self.logger.info("开始处理Amazon包装信息...")
             final_result_path = os.path.join(workflow_folder, file_name)
             await asyncio.to_thread(
-                self._fill_amazon_packaging, packing_result_path, amazon_file_path, final_result_path,
+                workbooks._fill_amazon_packaging, packing_result_path, amazon_file_path, final_result_path,
             )
             self.logger.info(f"Amazon最终结果文件已保存: {final_result_path}")
             
@@ -1269,16 +1204,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             await asyncio.to_thread(self._notify_tech_support, f"处理运营文件失败：{str(e)}")
             # 发生错误时不重置状态，允许运营重新上传
     
-    @staticmethod
-    def _fill_amazon_packaging(packing_result_path: str, amazon_file_path: str, final_result_path: str) -> None:
-        summary = pd.read_excel(packing_result_path, sheet_name='拼箱计算结果')
-        cols = ['小组名称', '单箱重量', '单箱理论长', '单箱理论高', '单箱理论宽']
-        summary[cols] = summary[cols].ffill()
-        processor = PackingBoxProcessor(input_file_path=packing_result_path, output_file_path=packing_result_path)
-        processor.insert_data_to_amazon_packaging(amazon_file_path, summary)
-        if os.path.abspath(amazon_file_path) != os.path.abspath(final_result_path):
-            shutil.copy2(amazon_file_path, final_result_path)
-
     async def _send_help_message(self, incoming_message, user_role: str):
         """发送帮助信息"""
         if user_role == 'logistics':
@@ -1744,7 +1669,7 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
                 template_file_name = os.path.basename(config.AMAZON_TEMPLATE_SOURCE_FILE)
             template_path = os.path.join(workflow_folder, template_file_name)
             await asyncio.to_thread(
-                self._create_amazon_template_v2, packing_result_path, template_path, template_source,
+                workbooks._create_amazon_template_v2, packing_result_path, template_path, template_source,
             )
 
             media_id, uploaded_file_name = await asyncio.to_thread(self._upload_stream_file, template_path, incoming_message)
@@ -1765,15 +1690,6 @@ class WorkflowBotHandler(dingtalk_stream.ChatbotHandler):
             await self._send_text_reply(f"❌ 生成模板2失败: {str(e)}", incoming_message)
             await asyncio.to_thread(self._notify_tech_support, f"生成Amazon模板2失败：{str(e)}")
     
-    @staticmethod
-    def _create_amazon_template_v2(packing_result_path: str, template_path: str, template_source: str) -> None:
-        summary = pd.read_excel(packing_result_path, sheet_name='拼箱计算结果')
-        for col in ['小组名称', '单箱重量', '单箱理论长', '单箱理论高', '单箱理论宽']:
-            if col in summary.columns:
-                summary[col] = summary[col].ffill()
-        processor = PackingBoxProcessor(input_file_path=packing_result_path, output_file_path=packing_result_path)
-        processor.create_amazon_template(template_path, summary, template_source=template_source)
-
     def _extract_shipping_numbers(self, file_path: str) -> Optional[str]:
         """读取发货单详情表中的发货单号，去重后按顺序拼接"""
         sheet_name = '发货单详情'

@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 from pypdf import PdfReader, PdfWriter
 
-SKILL_DIR = Path('skills/pdf-zip-splitter')
+SKILL_DIR = Path(__file__).resolve().parents[1] / 'skills' / 'pdf-zip-splitter'
 SCRIPT_PATH = SKILL_DIR / 'scripts' / 'pdf_split_zip.py'
 
 

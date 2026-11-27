@@ -18,18 +18,14 @@ def _find_repo_root(start: Path) -> Path:
 
 ROOT_DIR = _find_repo_root(Path(__file__).resolve().parent)
 APP_DIR = Path(__file__).resolve().parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-if str(APP_DIR) not in sys.path:
-    sys.path.insert(0, str(APP_DIR))
 
 import os
 
-from dedup_store import TrackStateStore
-from milestones import match_milestone
-from pingyi_client import PingyiClient
-from runner import run_once
-from settings import load_config_from_env
+from apps.track_notify.dedup_store import TrackStateStore
+from apps.track_notify.milestones import match_milestone
+from apps.track_notify.pingyi_client import PingyiClient
+from apps.track_notify.runner import run_once
+from apps.track_notify.settings import load_config_from_env
 from shared.logging import setup_logger
 
 
