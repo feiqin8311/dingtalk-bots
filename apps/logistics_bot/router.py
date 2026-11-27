@@ -187,7 +187,7 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             self._bg_tasks.add(task)
             task.add_done_callback(self._bg_tasks.discard)
         if route == "reset":
-            self._reset_user(user_id)
+            await self._reset_user(user_id)
             still_packing = self._handler_has_work(self.pinxiang_handler, user_id) or self._handler_has_work(
                 self.lcl_handler, user_id
             )
@@ -450,12 +450,11 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
             self.logger.warning("session webhook send failed: %s", exc)
             return False
 
-    def _reset_user(self, user_id: str) -> None:
+    async def _reset_user(self, user_id: str) -> None:
         if not user_id:
             return
-        prev = self._selected_branch_by_user.get(user_id)
         with self._branch_lock:
-            self._selected_branch_by_user.pop(user_id, None)
+            prev = self._selected_branch_by_user.pop(user_id, None)
             self._save_branch_state_unlocked()
         self.split_handler._pending_uploads.pop(user_id, None)
         self.split_handler._pending_confirmations.pop(user_id, None)
@@ -463,17 +462,8 @@ class LogisticsRouter(dingtalk_stream.ChatbotHandler):
         clear = getattr(self.pinxiang_handler, "clear_user", None)
         if callable(clear):
             clear(user_id)
-        # lcl：物流重置只清物流会话，保留运营进行中的单与队列
-        if prev == "lcl":
-            try:
-                sm = getattr(self.lcl_handler, "state_manager", None)
-                if sm is not None:
-                    if hasattr(sm, "reset_logistics_only"):
-                        sm.reset_logistics_only()
-                    elif hasattr(sm, "release_logistics_session"):
-                        sm.release_logistics_session()
-            except Exception as exc:
-                self.logger.warning("lcl logistics-only reset failed: %s", exc)
+        if prev == "lcl" or self.lcl_handler.has_logistics_session(user_id):
+            await self.lcl_handler.reset_logistics_for_user(user_id)
 
     @staticmethod
     def _extract_user_id(payload: dict) -> str:

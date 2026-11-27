@@ -559,6 +559,22 @@ class DingTalkAPI:
             logger.error(f"❌ 机器人消息发送异常: {e}")
             return False
     
+    def reply_text(self, webhook: str, text: str, staff_id: Optional[str]) -> None:
+        """会话内回复，保留 SDK 的 @ 发送者行为并限制网络等待时间。"""
+        response = requests.post(
+            webhook,
+            json={
+                "msgtype": "text",
+                "text": {"content": text},
+                "at": {"atUserIds": [staff_id] if staff_id else []},
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("errcode") not in (0, "0", None):
+            raise RuntimeError(f"钉钉回复失败: {result.get('errmsg')}")
+
     def send_interactive_card(self, webhook: str, card_data: dict) -> bool:
         """
         发送交互式卡片（支持按钮回调）

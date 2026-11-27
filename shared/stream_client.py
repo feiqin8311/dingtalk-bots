@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 from typing import Any, Coroutine, Optional
 from urllib.parse import quote_plus
 
 import dingtalk_stream
+from dingtalk_stream.version import VERSION_STRING
+import requests
 import websockets
 
 _RECONNECT_DELAY_SEC = 3
 _OPEN_CONNECTION_RETRY_SEC = 10
+_OPEN_CONNECTION_TIMEOUT_SEC = 10
 
 
 class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):
@@ -41,6 +45,30 @@ class ResilientDingTalkStreamClient(dingtalk_stream.DingTalkStreamClient):
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
+
+    def open_connection(self) -> dict[str, Any]:
+        # The SDK's implementation doesn't set a timeout. Keep its request
+        # format so both callbacks and event subscriptions work the same way.
+        subscriptions = [{"type": "EVENT", "topic": "*"}] if self._is_event_required else []
+        subscriptions.extend({"type": "CALLBACK", "topic": topic} for topic in self.callback_handler_map)
+        response = requests.post(
+            self.OPEN_CONNECTION_API,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": f"DingTalkStream/1.0 SDK/{VERSION_STRING} Python/{platform.python_version()} "
+                "(+https://github.com/open-dingtalk/dingtalk-stream-sdk-python)",
+            },
+            json={
+                "clientId": self.credential.client_id,
+                "clientSecret": self.credential.client_secret,
+                "subscriptions": subscriptions,
+                "ua": f"dingtalk-sdk-python/v{VERSION_STRING}-union",
+                "localIp": self.get_host_ip(),
+            },
+            timeout=_OPEN_CONNECTION_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def start(self):
         self.pre_start()
