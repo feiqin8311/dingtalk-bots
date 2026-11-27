@@ -38,7 +38,7 @@ tests/         跨应用测试（路由、轨迹、分仓拼箱、共享模块�
 
 ```bash
 uv venv -p 3.11 .venv
-uv pip install -p .venv -r requirements.txt pytest
+uv pip install -p .venv -r requirements.txt pytest pyyaml
 PYTHON=.venv/bin/python scripts/run_tests.sh
 ```
 

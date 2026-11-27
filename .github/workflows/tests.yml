@@ -14,5 +14,5 @@ jobs:
         with:
           python-version: "3.11"  # matches the Docker image
           cache: pip
-      - run: pip install -r requirements.txt pytest
+      - run: pip install -r requirements.txt pytest pyyaml
       - run: scripts/run_tests.sh
